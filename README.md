@@ -2,7 +2,8 @@
 
 Личный self-hosted инструмент учёта и анализа портфеля (российский рынок).
 Описание функционала — [`docs/portfolio-spec.md`](docs/portfolio-spec.md),
-техническое описание реализованного — [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md).
+техническое описание реализованного — [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md),
+разбор формата отчёта брокера — [`docs/BROKER-REPORT-FORMAT.md`](docs/BROKER-REPORT-FORMAT.md).
 
 **Текущий этап — первый:** журнал операций, импорт отчётов брокера, сверка
 остатков, инварианты, golden-тесты парсера. Рабочий план этапа —
@@ -91,6 +92,7 @@ src/portfolio/
 scripts/bondlab/          одноразовый трек: выгрузка с MOEX ISS, verify-yields
 data/bondlab/             снапшоты ISS и SQLite трека (вне git)
 tests/                    golden-фикстуры, юнит-тесты, property-тесты
+tools/                    вспомогательные скрипты: инвентарь отчётов, обезличивание
 ```
 
 Направление импортов: `jobs` → `domain` → `calc`; `adapters` → `calc`. Обратных
@@ -139,7 +141,7 @@ python -m bondlab verify --board TQOB       # свой расчёт против
 ## Разработка
 
 ```bash
-pytest                                   # 212 тестов, без сети и без БД
+pytest                                   # 244 теста, без сети и без БД
 ruff check .
 mypy --strict src/portfolio/calc
 mypy                                     # весь пакет
@@ -169,13 +171,13 @@ python tests/make_iss_fixtures.py        # пересоздать синтети
 
 | Задача | Состояние |
 |---|---|
-| Шаг 0. Разведка архива отчётов | **за человеком**: фикстуры в `tests/fixtures/` пока синтетические |
+| Шаг 0. Разведка архива отчётов | форма одного реального отчёта разобрана ([`docs/BROKER-REPORT-FORMAT.md`](docs/BROKER-REPORT-FORMAT.md)); словарь операций по всему архиву — за человеком |
 | T1. Каркас, конфиг, БД, alembic | готово |
 | T2. `adapters/formats.py` | готово |
 | T3. `calc/money.py` | готово |
 | T4. `models.py` и первая миграция | готово |
 | T5. `adapters/broker/tables.py` | готово |
-| T6. `anchors.py`, `mapping_v1.py` | каркас готов, **калибровка по реальным отчётам не выполнена** |
+| T6. `anchors.py`, `mapping_v1.py` | каркас готов; реальный отчёт оказался выгрузкой Excel с другой раскладкой — нужен `mapping_v2`, см. разбор формата |
 | T7. `domain/` | готово |
 | T8. `jobs/import_broker.py` | готово |
 | T9. `jobs/import_csv.py`, начальные остатки | готово |
