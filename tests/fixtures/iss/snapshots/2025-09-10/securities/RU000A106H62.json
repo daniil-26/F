@@ -1,0 +1,154 @@
+{
+ "description": {
+  "columns": [
+   "name",
+   "title",
+   "value",
+   "type",
+   "sort_order",
+   "is_hidden",
+   "precision"
+  ],
+  "data": [
+   [
+    "SECID",
+    "Код инструмента",
+    "RU000A106H62",
+    "string",
+    1,
+    0,
+    null
+   ],
+   [
+    "NAME",
+    "Полное наименование",
+    "Дисконт 06 (синтетическая фикстура)",
+    "string",
+    2,
+    0,
+    null
+   ],
+   [
+    "SHORTNAME",
+    "Краткое наименование",
+    "Дисконт 06",
+    "string",
+    3,
+    0,
+    null
+   ],
+   [
+    "ISIN",
+    "ISIN код",
+    "RU000A106H62",
+    "string",
+    4,
+    0,
+    null
+   ],
+   [
+    "ISSUEDATE",
+    "Дата начала торгов",
+    "2023-06-30",
+    "string",
+    5,
+    0,
+    null
+   ],
+   [
+    "MATDATE",
+    "Дата погашения",
+    "2026-06-30",
+    "string",
+    6,
+    0,
+    null
+   ],
+   [
+    "INITIALFACEVALUE",
+    "Первоначальная номинальная стоимость",
+    "1000",
+    "string",
+    7,
+    0,
+    null
+   ],
+   [
+    "FACEVALUE",
+    "Номинальная стоимость",
+    "1000",
+    "string",
+    8,
+    0,
+    null
+   ],
+   [
+    "FACEUNIT",
+    "Валюта номинала",
+    "SUR",
+    "string",
+    9,
+    0,
+    null
+   ],
+   [
+    "COUPONFREQUENCY",
+    "Периодичность выплаты купона в год",
+    "0",
+    "string",
+    10,
+    0,
+    null
+   ],
+   [
+    "TYPE",
+    "Тип бумаги",
+    "corporate_bond",
+    "string",
+    11,
+    0,
+    null
+   ],
+   [
+    "GROUP",
+    "Группа инструментов",
+    "stock_bonds",
+    "string",
+    12,
+    0,
+    null
+   ],
+   [
+    "ISQUALIFIEDINVESTORS",
+    "Бумага для квалифицированных инвесторов",
+    "0",
+    "string",
+    13,
+    0,
+    null
+   ]
+  ]
+ },
+ "boards": {
+  "columns": [
+   "secid",
+   "boardid",
+   "title",
+   "is_primary",
+   "currencyid",
+   "market",
+   "engine"
+  ],
+  "data": [
+   [
+    "RU000A106H62",
+    "TQCB",
+    "Т+: Облигации",
+    1,
+    "SUR",
+    "bonds",
+    "stock"
+   ]
+  ]
+ }
+}

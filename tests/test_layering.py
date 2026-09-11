@@ -79,6 +79,25 @@ def test_calc_knows_nothing_about_io() -> None:
         assert "datetime.now(" not in source, f"{module.name} знает текущее время"
 
 
+def test_bondlab_touches_only_the_calculation_core() -> None:
+    """Красная линия параллельного трека: одноразовый код не знает про журнал.
+
+    `scripts/bondlab/` (`docs/PARALLEL-TRACK.md`) считает числа о рынке и не
+    должен иметь возможности записать что-либо в боевую БД или прочитать из
+    неё позиции. Проверяется статически: из проекта ему доступен только слой
+    `calc`, а SQLAlchemy недоступна вовсе.
+    """
+    bondlab = Path(__file__).resolve().parents[1] / "scripts" / "bondlab"
+
+    for module in sorted(bondlab.rglob("*.py")):
+        forbidden = _imported_layers(module) - {"calc"}
+        assert not forbidden, f"bondlab/{module.name} импортирует {sorted(forbidden)}"
+
+        source = module.read_text(encoding="utf-8")
+        assert "sqlalchemy" not in source, f"bondlab/{module.name} знает про ORM боевой БД"
+        assert "portfolio.db" not in source, f"bondlab/{module.name} знает про боевую БД"
+
+
 def test_transactions_are_opened_only_in_jobs() -> None:
     """Транзакции открываются только в `jobs/` (спека 9)."""
     for module in SOURCE.rglob("*.py"):

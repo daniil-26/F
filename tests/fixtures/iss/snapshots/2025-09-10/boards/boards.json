@@ -1,0 +1,36 @@
+{
+ "boards": {
+  "columns": [
+   "id",
+   "board_group_id",
+   "engine",
+   "market",
+   "boardid",
+   "boardtitle",
+   "title",
+   "is_traded"
+  ],
+  "data": [
+   [
+    1,
+    58,
+    "stock",
+    "bonds",
+    "TQCB",
+    "Т+: Облигации - безадрес.",
+    "Т+: Облигации - безадрес.",
+    1
+   ],
+   [
+    2,
+    58,
+    "stock",
+    "bonds",
+    "TQOB",
+    "Т+: Гособлигации - безадрес.",
+    "Т+: Гособлигации - безадрес.",
+    1
+   ]
+  ]
+ }
+}
