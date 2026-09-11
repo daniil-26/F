@@ -10,3 +10,7 @@ __pycache__/
 # Сырьё брокера резервируется отдельно от git (спека 5.8)
 data/raw/*
 !data/raw/.gitkeep
+
+# Снапшоты ISS, кеш и SQLite параллельного трека: данные, а не код.
+# Эталонный набор лежит в tests/fixtures/iss/ и в git входит.
+data/bondlab/

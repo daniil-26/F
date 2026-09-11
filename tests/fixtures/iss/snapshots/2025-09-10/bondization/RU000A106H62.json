@@ -1,0 +1,66 @@
+{
+ "coupons": {
+  "columns": [
+   "isin",
+   "name",
+   "issuevalue",
+   "coupondate",
+   "recorddate",
+   "startdate",
+   "initialfacevalue",
+   "facevalue",
+   "faceunit",
+   "value",
+   "valueprc",
+   "value_rub"
+  ],
+  "data": []
+ },
+ "amortizations": {
+  "columns": [
+   "isin",
+   "name",
+   "issuevalue",
+   "amortdate",
+   "facevalue",
+   "initialfacevalue",
+   "faceunit",
+   "valueprc",
+   "value",
+   "value_rub",
+   "data_source"
+  ],
+  "data": [
+   [
+    "RU000A106H62",
+    "Дисконт 06",
+    null,
+    "2026-06-30",
+    1000.0,
+    1000.0,
+    "SUR",
+    100.0,
+    1000.0,
+    1000.0,
+    "amortization"
+   ]
+  ]
+ },
+ "offers": {
+  "columns": [
+   "isin",
+   "name",
+   "issuevalue",
+   "offerdate",
+   "offerdatestart",
+   "offerdateend",
+   "price",
+   "value",
+   "agent",
+   "fixdate",
+   "faceunit",
+   "offertype"
+  ],
+  "data": []
+ }
+}
