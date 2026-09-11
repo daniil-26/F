@@ -1,0 +1,80 @@
+[project]
+name = "portfolio"
+version = "0.1.0"
+description = "Личный учёт инвестиций: журнал операций, импорт отчётов брокера, сверка"
+requires-python = ">=3.11"
+dependencies = [
+    "sqlalchemy>=2.0",
+    "alembic>=1.13",
+    "psycopg[binary]>=3.1",
+    "pydantic>=2.6",
+    "pydantic-settings>=2.2",
+    "typer>=0.12",
+    "rich>=13.7",
+    "lxml>=5.1",
+    "beautifulsoup4>=4.12",
+]
+
+[project.optional-dependencies]
+dev = [
+    "pytest>=8.0",
+    "hypothesis>=6.98",
+    "ruff>=0.4",
+    "mypy>=1.9",
+]
+
+[project.scripts]
+portfolio = "portfolio.cli:app"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/portfolio"]
+
+[tool.ruff]
+line-length = 100
+src = ["src", "tests"]
+target-version = "py311"
+
+[tool.ruff.lint]
+select = ["E", "F", "I", "UP", "B", "SIM", "TID", "RUF"]
+# Комментарии и docstring по-русски: кириллица не «неоднозначный символ».
+ignore = ["RUF001", "RUF002", "RUF003"]
+
+# Направление импортов (jobs -> domain -> calc; adapters -> calc) проверяется
+# тестом tests/test_layering.py: он различает слои, а линтер — нет.
+
+[tool.ruff.lint.per-file-ignores]
+# Typer объявляет параметры вызовами в значениях по умолчанию — это его идиома.
+"src/portfolio/cli.py" = ["B008"]
+# Миграции генерируются alembic: переносить строки в них — мешать автогенерации.
+"migrations/versions/*" = ["E501"]
+
+[tool.mypy]
+python_version = "3.11"
+files = ["src/portfolio"]
+ignore_missing_imports = true
+
+# Строгий режим на расчётном ядре. Отдельной командой:
+#   mypy --strict src/portfolio/calc
+[[tool.mypy.overrides]]
+module = "portfolio.calc.*"
+disallow_untyped_defs = true
+disallow_incomplete_defs = true
+disallow_untyped_calls = true
+disallow_any_generics = true
+disallow_subclassing_any = true
+warn_return_any = true
+no_implicit_reexport = true
+strict_equality = true
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src"]
+markers = [
+    "oracle: требует сети и внешних эталонов, в основной прогон не входит",
+    "db: требует поднятой PostgreSQL",
+]
+addopts = "-m 'not oracle' --strict-markers"

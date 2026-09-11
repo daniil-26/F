@@ -1,0 +1,12 @@
+.env
+__pycache__/
+*.py[cod]
+.venv/
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+*.egg-info/
+
+# Сырьё брокера резервируется отдельно от git (спека 5.8)
+data/raw/*
+!data/raw/.gitkeep

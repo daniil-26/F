@@ -1,0 +1,131 @@
+{
+  "mapping_version": "v1",
+  "period_start": "2019-03-01",
+  "period_end": "2019-03-31",
+  "account_code": "12345-АБВ",
+  "operations": [
+    {
+      "kind": "BUY",
+      "trade_date": "2019-03-12",
+      "settlement_date": "2019-03-12",
+      "ticker": "SBER",
+      "isin": null,
+      "quantity": "100",
+      "price": "210.50",
+      "accrued_int": null,
+      "fee": "63.15",
+      "fee_kind": null,
+      "amount": "-21050.00",
+      "currency": "RUB",
+      "broker_trade_no": null,
+      "withheld_at_source": null
+    },
+    {
+      "kind": "FEE",
+      "trade_date": "2019-03-12",
+      "settlement_date": "2019-03-12",
+      "ticker": "SBER",
+      "isin": null,
+      "quantity": null,
+      "price": null,
+      "accrued_int": null,
+      "fee": null,
+      "fee_kind": "BROKER",
+      "amount": "-63.15",
+      "currency": "RUB",
+      "broker_trade_no": null,
+      "withheld_at_source": null
+    },
+    {
+      "kind": "SELL",
+      "trade_date": "2019-03-26",
+      "settlement_date": "2019-03-26",
+      "ticker": "GAZP",
+      "isin": null,
+      "quantity": "-40",
+      "price": "155.25",
+      "accrued_int": null,
+      "fee": "18.63",
+      "fee_kind": null,
+      "amount": "6210.00",
+      "currency": "RUB",
+      "broker_trade_no": null,
+      "withheld_at_source": null
+    },
+    {
+      "kind": "FEE",
+      "trade_date": "2019-03-26",
+      "settlement_date": "2019-03-26",
+      "ticker": "GAZP",
+      "isin": null,
+      "quantity": null,
+      "price": null,
+      "accrued_int": null,
+      "fee": null,
+      "fee_kind": "BROKER",
+      "amount": "-18.63",
+      "currency": "RUB",
+      "broker_trade_no": null,
+      "withheld_at_source": null
+    },
+    {
+      "kind": "CASH_IN",
+      "trade_date": "2019-03-05",
+      "settlement_date": "2019-03-05",
+      "ticker": null,
+      "isin": null,
+      "quantity": null,
+      "price": null,
+      "accrued_int": null,
+      "fee": null,
+      "fee_kind": null,
+      "amount": "30000.00",
+      "currency": "RUB",
+      "broker_trade_no": null,
+      "withheld_at_source": null
+    },
+    {
+      "kind": "FEE",
+      "trade_date": "2019-03-31",
+      "settlement_date": "2019-03-31",
+      "ticker": null,
+      "isin": null,
+      "quantity": null,
+      "price": null,
+      "accrued_int": null,
+      "fee": null,
+      "fee_kind": "DEPOSITARY",
+      "amount": "-150.00",
+      "currency": "RUB",
+      "broker_trade_no": null,
+      "withheld_at_source": null
+    }
+  ],
+  "balances": [
+    {
+      "kind": "cash",
+      "ticker": null,
+      "isin": null,
+      "quantity": "15928.22",
+      "currency": "RUB",
+      "as_of": "2019-03-31"
+    },
+    {
+      "kind": "security",
+      "ticker": "SBER",
+      "isin": null,
+      "quantity": "100",
+      "currency": "RUB",
+      "as_of": "2019-03-31"
+    },
+    {
+      "kind": "security",
+      "ticker": "GAZP",
+      "isin": null,
+      "quantity": "100",
+      "currency": "RUB",
+      "as_of": "2019-03-31"
+    }
+  ],
+  "unparsed": []
+}
