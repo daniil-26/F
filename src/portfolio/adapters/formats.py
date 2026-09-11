@@ -22,7 +22,6 @@ __all__ = [
     "parse_decimal",
     "parse_optional_date",
     "parse_optional_decimal",
-    "parse_quantity",
 ]
 
 
@@ -145,11 +144,6 @@ def parse_optional_decimal(raw: str | Decimal | int | None) -> Decimal | None:
         return None
     if isinstance(raw, str) and is_blank(raw):
         return None
-    return parse_decimal(raw)
-
-
-def parse_quantity(raw: str | Decimal | int) -> Decimal:
-    """Количество бумаг. Дробные количества встречаются у паёв, поэтому не int."""
     return parse_decimal(raw)
 
 

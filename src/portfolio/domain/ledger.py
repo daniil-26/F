@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
@@ -282,8 +282,3 @@ def _existing_by_key(session: Session, keys: Sequence[str]) -> dict[str, Transac
         return {}
     found = session.scalars(select(Transaction).where(Transaction.natural_key.in_(keys)))
     return {row.natural_key: row for row in found}
-
-
-def with_report(entries: Iterable[LedgerEntry], report_id: int) -> list[LedgerEntry]:
-    """Проставляет ссылку на сохранённое сырьё всем записям набора."""
-    return [replace(entry, source_report_id=report_id) for entry in entries]
