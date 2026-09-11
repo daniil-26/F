@@ -122,7 +122,10 @@ python -m bondlab schedule SU26238RMFS4     # график из снапшота
 python -m bondlab verify --board TQOB       # свой расчёт против биржевого
 ```
 
-Подробнее — [`scripts/bondlab/README.md`](scripts/bondlab/README.md).
+Подробнее: [`docs/BONDS-IMPLEMENTATION.md`](docs/BONDS-IMPLEMENTATION.md) —
+разбор модулей, взаимодействия функций и форматов данных;
+[`scripts/bondlab/README.md`](scripts/bondlab/README.md) — как пользоваться
+командами трека.
 
 **Что уже проверено и что нет.** Тесты работают на синтетических снапшотах в
 `tests/fixtures/iss/` и проверяют проводку данных, а не конвенции Мосбиржи:
