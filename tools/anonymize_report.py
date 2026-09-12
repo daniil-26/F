@@ -64,7 +64,9 @@ Golden-тесты парсера требуют настоящих отчёто�
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
+import math
 import random
 import re
 import sys
@@ -142,6 +144,9 @@ PSEUDONYM_FORMATS = {
     "staff": "СОТРУДНИК-{n:02d}",
     "contact": "КОНТАКТ-{n:02d}",
     "storage": "ДЕПОЗИТАРИЙ-{n:02d}",
+    # Значение в колонке ISIN, не являющееся ISIN: у части выпусков там стоит
+    # внутренний код. Отдельная категория, чтобы не спутать с БУМАГА-nn.
+    "isin": "КОД-{n:02d}",
     "person": "ФИО-{n:02d}",
     "license": "ЛИЦЕНЗИЯ-{n:02d}",
     "instrument": "БУМАГА-{n:02d}",
@@ -174,7 +179,7 @@ PERSON_RE = re.compile(r"\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.")
 # и второй раз его переименовывать нельзя — иначе БУМАГА-02 превратится в БУМАГА-03.
 PSEUDONYM_PREFIXES = (
     "БУМАГА", "ЭМИТЕНТ", "РЕГНОМЕР", "ДЕПОЗИТАРИЙ", "КЛИЕНТ", "БРОКЕР",
-    "СЧЕТ", "ДОГОВОР", "СОТРУДНИК", "КОНТАКТ", "ФИО-", "ЛИЦЕНЗИЯ",
+    "СЧЕТ", "ДОГОВОР", "СОТРУДНИК", "КОНТАКТ", "ФИО-", "ЛИЦЕНЗИЯ", "КОД-",
 )
 # Псевдо-ISIN опознаётся по форме, а не по префиксу: код страны в нём сохраняется
 # от оригинала (US, MC, XS), и проверка на литерал «RU000Z» объявляла бы
@@ -186,6 +191,23 @@ COUPON_TAIL_RE = re.compile(r"(?i)((?:погашение|выплата)\s+ку�
 # «ПАО "Северсталь"», «Публичное акционерное общество "Северсталь"». Правило
 # общее намеренно: узкое (только после ПАО/ООО) пропускало развёрнутую форму.
 QUOTED_NAME_RE = re.compile(r'"([^"]{2,80})"|«([^»]{2,80})»')
+
+# Секции, которые прореживаются, и способ выбора строк. Номер сравнивается с
+# началом подписи, поэтому «5» покрывает 5.1, 5.4 и 5.10.
+#   rows   — прореживаются строки таблицы;
+#   groups — сначала бумаги (строка-подзаголовок выпуска со всем её блоком),
+#            потом строки внутри каждой оставленной бумаги.
+SAMPLE_SECTION_KINDS: dict[str, str] = {"2": "rows", "5": "groups", "8": "rows"}
+DEFAULT_SAMPLE_SECTIONS: tuple[str, ...] = ("2", "5", "8")
+
+# Правило из задачи: прореживать только там, где строк больше двух. На одной и
+# двух строках прореживание уничтожило бы саму секцию.
+SAMPLE_MIN_ITEMS = 2
+
+# Строка таблицы имеет хотя бы столько заполненных ячеек. Отсекает хвост
+# документа — подписи, подтверждение клиента, дату формирования отчёта: секция
+# кончается таблицей, а не последней подписью, но в разметке это не размечено.
+SAMPLE_MIN_CELLS = 3
 
 MASKED_DATE = "00.00.0000"
 MASKED_TIME = "00:00:00"
@@ -300,15 +322,27 @@ class Options:
     amounts: str = "mask"         # mask | keep
     keep_instruments: bool = False
     flat_identity: bool = False   # всё личное одной строкой XXX, как в примере
+    # Доля строк операций, которую оставить (0 < sample <= 1). None — оставить все.
+    sample: float | None = None
+    sample_sections: tuple[str, ...] = DEFAULT_SAMPLE_SECTIONS
 
 
 @dataclass
 class Stats:
     changed: Counter[str] = field(default_factory=Counter)
     residual: Counter[str] = field(default_factory=Counter)
+    # Строки, выброшенные при прореживании, по секциям.
+    dropped: Counter[str] = field(default_factory=Counter)
+    # Бумаги, выброшенные целиком: считаются отдельно от строк, иначе итог
+    # «сколько строк удалено» перестаёт сходиться с документом.
+    dropped_groups: Counter[str] = field(default_factory=Counter)
 
     def note(self, category: str) -> None:
         self.changed[category] += 1
+
+    @property
+    def dropped_rows(self) -> int:
+        return sum(self.dropped.values())
 
 
 class Anonymizer:
@@ -316,6 +350,9 @@ class Anonymizer:
         self.store = store
         self.options = options
         self.stats = Stats()
+        # Зерно выбора строк: от содержимого файла, чтобы повторный прогон дал
+        # ту же выборку, а разные отчёты — разную.
+        self._digest = ""
 
     # -- точка входа --------------------------------------------------------
 
@@ -324,12 +361,194 @@ class Anonymizer:
         self._clean_head(document)
         self._clean_images(document)
 
+        # Прореживание идёт до обезличивания: выброшенные строки не попадают в
+        # файл соответствий, и в нём остаются только те бумаги, что в фикстуре.
+        self._digest = hashlib.sha256(content).hexdigest()
+        if self.options.sample is not None:
+            self._sample_document(document)
+
         grid = build_grid(document)
         for cell in grid.unique_cells():
             self._process_cell(cell, grid)
 
         self._collect_residual(grid)
         return self._serialize(document)
+
+    # -- прореживание -------------------------------------------------------
+
+    def _sample_document(self, document: Any) -> None:
+        """Оставляет заданную долю строк операций.
+
+        Фикстура из архива за годы — это тысячи строк, из которых парсер
+        проверяется первыми же десятками. Прореживание уменьшает её, сохраняя
+        разнообразие: строки выбираются псевдослучайно с зерном от содержимого
+        файла, поэтому повторный прогон даёт тот же результат.
+
+        **Арифметика после этого не сходится**: итоги и остатки считались по
+        всем строкам. Прореженная фикстура проверяет разбор, а не сверку.
+        """
+        grid = build_grid(document)
+        doomed: list[int] = []
+
+        for title, rows in self._sections_in_order(grid).items():
+            kind = self._sample_kind(title)
+            if kind is None:
+                continue
+            if kind == "groups":
+                doomed.extend(self._sample_trade_section(grid, title, rows))
+            else:
+                doomed.extend(self._sample_plain_section(grid, title, rows))
+
+        for index in sorted(set(doomed), reverse=True):
+            _remove_row(grid, index)
+
+    def _sections_in_order(self, grid: ReportGrid) -> dict[str, list[int]]:
+        result: dict[str, list[int]] = {}
+        for index in range(len(grid.rows)):
+            result.setdefault(grid.sections.get(index) or "", []).append(index)
+        return result
+
+    def _sample_kind(self, title: str) -> str | None:
+        match = re.match(r"^(\d{1,2})(?:\.\d{1,2})?[.\s]", title)
+        if match is None:
+            return None
+        number = match.group(1)
+        if number not in self.options.sample_sections:
+            return None
+        return SAMPLE_SECTION_KINDS.get(number, "rows")
+
+    def _sample_plain_section(
+        self, grid: ReportGrid, title: str, rows: list[int]
+    ) -> list[int]:
+        """Секции 2 и 8: прореживаются строки данных таблицы.
+
+        Шапки, подписи секций и строки «Итого» не трогаются: без них фикстура
+        перестанет проверять то, ради чего она есть.
+        """
+        return self._drop_list(self._table_rows(grid, rows), title)
+
+    def _table_rows(self, grid: ReportGrid, rows: list[int]) -> list[int]:
+        """Строки таблицы секции: после её шапки и достаточно широкие.
+
+        Нумерация секций в отчёте разрежена, а конец секции в разметке ничем не
+        отмечен: строки после последней таблицы (подписи, подтверждение клиента,
+        дата формирования) формально принадлежат последней секции. Прореживать
+        их нельзя.
+        """
+        start = self._header_row(grid, rows)
+        if start is None:
+            return []
+        return [
+            index
+            for index in rows
+            if index > start and self._is_data_row(grid, index)
+        ]
+
+    @staticmethod
+    def _header_row(grid: ReportGrid, rows: list[int]) -> int | None:
+        headers = [index for index in rows if grid.is_header_row(index)]
+        return min(headers) if headers else None
+
+    def _sample_trade_section(
+        self, grid: ReportGrid, title: str, rows: list[int]
+    ) -> list[int]:
+        """Секции 5.*: сначала бумаги, потом строки внутри каждой оставшейся.
+
+        Бумага в этом отчёте — строка-подзаголовок с описанием выпуска, за ней
+        её сделки и её же «Итого по выпуску». Выброшенная бумага уходит целиком:
+        оставить её итог без сделок значит получить фикстуру, которой в природе
+        не бывает.
+        """
+        start = self._header_row(grid, rows)
+        if start is None:
+            return []
+        groups = self._trade_groups(grid, [index for index in rows if index > start])
+        if not groups:
+            return self._sample_plain_section(grid, title, rows)
+
+        doomed: list[int] = []
+        kept = self._keep_indexes(len(groups), f"{title}|бумаги")
+
+        for position, group in enumerate(groups):
+            if position not in kept:
+                # Бумага уходит целиком: подзаголовок выпуска, её сделки и её
+                # «Итого по выпуску». Итог без сделок — фикстура, которой не бывает.
+                doomed.extend(group["all"])
+                self.stats.dropped[title] += len(group["all"])
+                self.stats.dropped_groups[title] += 1
+                continue
+            doomed.extend(self._drop_list(group["data"], f"{title}|{group['name']}"))
+        return doomed
+
+    def _trade_groups(self, grid: ReportGrid, rows: list[int]) -> list[dict[str, Any]]:
+        """Разбивает секцию сделок на блоки «выпуск → его строки → его итоги»."""
+        groups: list[dict[str, Any]] = []
+        current: dict[str, Any] | None = None
+
+        for index in rows:
+            if grid.is_section_row(index) or grid.is_header_row(index):
+                current = None
+                continue
+
+            values = [value for value in grid.row_text(index) if value]
+            if not values:
+                continue
+
+            if _is_group_header(grid, index, values):
+                current = {
+                    "name": values[0],
+                    "data": [],
+                    "all": [index],
+                }
+                groups.append(current)
+                continue
+
+            if current is None:
+                continue
+
+            if has_total_marker(values):
+                if _is_section_total(values):
+                    current = None
+                    continue
+                current["all"].append(index)
+                continue
+
+            if self._is_data_row(grid, index):
+                current["data"].append(index)
+                current["all"].append(index)
+        return groups
+
+    def _drop_list(self, candidates: list[int], key: str) -> list[int]:
+        kept = self._keep_indexes(len(candidates), key)
+        doomed = [index for position, index in enumerate(candidates) if position not in kept]
+        if doomed:
+            self.stats.dropped[key.split("|")[0]] += len(doomed)
+        return doomed
+
+    def _keep_indexes(self, count: int, key: str) -> set[int]:
+        """Какие позиции оставить: доля от общего числа, но не меньше одной.
+
+        При двух и менее элементах не трогаем ничего (правило из задачи), иначе
+        округляем к ближайшему: 0.7 от пяти — четыре, от трёх — две.
+        """
+        fraction = self.options.sample
+        if fraction is None or count <= SAMPLE_MIN_ITEMS:
+            return set(range(count))
+
+        keep = max(1, math.floor(count * fraction + 0.5))
+        if keep >= count:
+            return set(range(count))
+
+        rng = random.Random(f"{self._digest}|{key}")
+        return set(rng.sample(range(count), keep))
+
+    def _is_data_row(self, grid: ReportGrid, index: int) -> bool:
+        if grid.is_section_row(index) or grid.is_header_row(index):
+            return False
+        values = [value for value in grid.row_text(index) if value]
+        if len(values) < SAMPLE_MIN_CELLS or has_total_marker(values):
+            return False
+        return _is_droppable(grid, index)
 
     # -- шапка документа и картинки ----------------------------------------
 
@@ -370,6 +589,13 @@ class Anonymizer:
         if not text:
             return
 
+        # Подпись секции остаётся дословно: её номер — не сумма. «5.10
+        # Исполнение обязательств по сделке» иначе становится «0 000.00
+        # Исполнение обязательств по сделке», потому что «5.10» подходит под
+        # форму денежного числа.
+        if grid.is_section_row(cell.row) and text == grid.sections.get(cell.row):
+            return
+
         category = self._identity_category(cell, grid)
         if category is not None:
             self._replace_whole(cell, self._identity_alias(category, text))
@@ -388,7 +614,10 @@ class Anonymizer:
             self._mask_structural(cell)
             return
 
-        header = grid.header_of(cell)
+        # Колоночные правила — только для настоящих строк таблицы. Строка из
+        # двух ячеек под шапкой из шестнадцати колонок таблицей не является:
+        # «На начало отчетного периода» иначе получает псевдоним из колонки ISIN.
+        header = grid.header_of(cell) if _looks_like_table_row(grid, cell.row) else None
         if header == "storage":
             self._replace_whole(cell, self._identity_alias("storage", text))
             self.stats.note("storage")
@@ -654,6 +883,57 @@ class Anonymizer:
         )
 
 
+def _looks_like_table_row(grid: ReportGrid, index: int) -> bool:
+    values = [value for value in grid.row_text(index) if value]
+    return len(values) >= SAMPLE_MIN_CELLS
+
+
+def _is_group_header(grid: ReportGrid, index: int, values: list[str]) -> bool:
+    """Строка-подзаголовок выпуска: одна заполненная ячейка с описанием бумаги.
+
+    В отчёте это `ПАО "Эмитент" RU000A103QK3 4B02-01-00566-R-001P RUR` — именно
+    отсюда берётся инструмент сделок, стоящих ниже.
+    """
+    if len(values) != 1 or has_total_marker(values):
+        return False
+    text = values[0]
+    if len(text) < 4 or is_number(text) or is_date(text) or is_time(text):
+        return False
+    return _is_droppable(grid, index)
+
+
+def _is_section_total(values: list[str]) -> bool:
+    """«Общий итог» и «Оборот за отчетный период» относятся к секции, а не к
+    выпуску: на них блок выпуска заканчивается."""
+    signature = normalize_text(values[0]).casefold().replace("ё", "е")
+    return signature.startswith(("общий итог", "оборот за"))
+
+
+def _is_droppable(grid: ReportGrid, index: int) -> bool:
+    """Строку можно выбросить, только если её ячейки принадлежат ей одной.
+
+    Объединение по вертикали (`rowspan`) связывает строки между собой, и
+    удаление одной из них сдвинуло бы соседние.
+    """
+    cells = [cell for cell in grid.rows[index] if cell is not None]
+    return bool(cells) and all(
+        cell.row == index and cell.rowspan == 1 for cell in cells
+    )
+
+
+def _remove_row(grid: ReportGrid, index: int) -> bool:
+    for cell in grid.rows[index]:
+        if cell is None or cell.row != index:
+            continue
+        row_element = cell.element.getparent()
+        parent = row_element.getparent() if row_element is not None else None
+        if parent is not None:
+            parent.remove(row_element)
+            return True
+        return False
+    return False
+
+
 def is_pseudonym(value: str) -> bool:
     """Значение уже обезличено этим скриптом.
 
@@ -754,6 +1034,22 @@ def build_parser() -> argparse.ArgumentParser:
         help="оставить названия бумаг, эмитентов и ISIN как есть (раскрывает состав портфеля)",
     )
     parser.add_argument(
+        "--sample",
+        type=float,
+        metavar="ДОЛЯ",
+        help=(
+            "оставить только эту долю строк операций, например 0.7 "
+            "(секции 2, 5 и 8; там, где строк больше двух). "
+            "Итоги после прореживания не сходятся — фикстура проверяет разбор"
+        ),
+    )
+    parser.add_argument(
+        "--sample-sections",
+        default=",".join(DEFAULT_SAMPLE_SECTIONS),
+        metavar="НОМЕРА",
+        help="какие секции прореживать, через запятую (по умолчанию 2,5,8)",
+    )
+    parser.add_argument(
         "--flat-identity",
         action="store_true",
         help="всё личное заменять на XXX вместо псевдонимов по категориям",
@@ -785,11 +1081,25 @@ def main(argv: list[str] | None = None) -> int:
     mapping_path = args.mapping or first_output.parent / ".anonymize-mapping.json"
     store = AliasStore.load(mapping_path, seed=args.seed)
 
+    if args.sample is not None and not 0 < args.sample <= 1:
+        print("--sample принимает долю в диапазоне (0, 1], например 0.7", file=sys.stderr)
+        return 2
+    if args.sample is not None and args.amounts == "keep":
+        print(
+            "ВНИМАНИЕ: --sample вместе с --amounts keep даёт настоящие суммы, "
+            "которые не сходятся с итогами. Такая фикстура вводит в заблуждение.",
+            file=sys.stderr,
+        )
+
     options = Options(
         dates=args.dates,
         amounts=args.amounts,
         keep_instruments=args.keep_instruments,
         flat_identity=args.flat_identity,
+        sample=args.sample,
+        sample_sections=tuple(
+            part.strip() for part in args.sample_sections.split(",") if part.strip()
+        ),
     )
 
     failures = 0
@@ -803,7 +1113,9 @@ def main(argv: list[str] | None = None) -> int:
             failures += 1
             continue
 
-        problem = verify_structure(source.read_bytes(), result)
+        problem = verify_structure(
+            source.read_bytes(), result, dropped_rows=anonymizer.stats.dropped_rows
+        )
         if problem is not None:
             print(f"{source}: структура изменилась — {problem}", file=sys.stderr)
             failures += 1
@@ -827,11 +1139,15 @@ def main(argv: list[str] | None = None) -> int:
     return 1 if failures else 0
 
 
-def verify_structure(before: bytes, after: bytes) -> str | None:
+def verify_structure(before: bytes, after: bytes, *, dropped_rows: int = 0) -> str | None:
     """Обезличивание правит текст, но не форму. Проверяется той же стадией 1.
 
     Если таблица, строки или ширины разошлись — скрипт сломал фикстуру, и
     golden-тест на ней проверял бы не то, что в отчёте.
+
+    При прореживании строк становится меньше ровно на число выброшенных;
+    построчное сравнение при этом невозможно — индексы сдвигаются, — поэтому
+    проверяется число таблиц и точное число оставшихся строк.
     """
     from portfolio.adapters.broker.tables import extract_tables
 
@@ -840,6 +1156,17 @@ def verify_structure(before: bytes, after: bytes) -> str | None:
 
     if len(source) != len(target):
         return f"таблиц было {len(source)}, стало {len(target)}"
+
+    rows_before = sum(len(table.rows) for table in source)
+    rows_after = sum(len(table.rows) for table in target)
+    if dropped_rows:
+        if rows_after != rows_before - dropped_rows:
+            return (
+                f"строк было {rows_before}, выброшено {dropped_rows}, "
+                f"ожидалось {rows_before - dropped_rows}, стало {rows_after}"
+            )
+        return None
+
     for left, right in zip(source, target, strict=True):
         if len(left.rows) != len(right.rows):
             return f"в таблице #{left.index} строк было {len(left.rows)}, стало {len(right.rows)}"
@@ -859,6 +1186,13 @@ def _print_report(source: Path, target: Path, stats: Stats, *, dry_run: bool) ->
         print("  заменено:")
         for category, count in stats.changed.most_common():
             print(f"    {category:<16} {count}")
+    if stats.dropped:
+        print(f"  выброшено при прореживании (строк: {stats.dropped_rows}):")
+        for section, count in stats.dropped.most_common():
+            groups = stats.dropped_groups.get(section, 0)
+            suffix = f", из них бумаг целиком: {groups}" if groups else ""
+            print(f"    {count:>4}  {section}{suffix}")
+        print("    итоги и остатки после прореживания не сходятся — это ожидаемо")
     if stats.residual:
         print("  ОСТАТОЧНЫЕ ПОДОЗРЕНИЯ — просмотреть глазами:")
         for item, count in stats.residual.most_common(20):

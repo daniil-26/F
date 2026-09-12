@@ -22,6 +22,7 @@ import pytest
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
+from _report_grid import ReportGrid, build_grid, parse_document  # noqa: E402
 from anonymize_report import (  # noqa: E402
     AliasStore,
     Anonymizer,
@@ -32,6 +33,9 @@ from anonymize_report import (  # noqa: E402
 )
 
 RAW = Path(__file__).parent / "fixtures" / "tools" / "broker_raw_sample.html"
+# Отчёт с пятью бумагами в портфеле, четырьмя выпусками в сделках (3, 2, 4 и 1
+# сделка) и шестью неторговыми операциями — на нём видно прореживание.
+SAMPLING = Path(__file__).parent / "fixtures" / "tools" / "broker_sampling_sample.html"
 
 # Всё, что в фикстуре изображает персональные данные.
 SECRETS = (
@@ -299,3 +303,175 @@ def _delta(left: str, right: str) -> int:
 def _parse(value: str) -> date:
     day, month, year = (int(part) for part in value.split("."))
     return date(year, month, day)
+
+
+# --- прореживание -----------------------------------------------------------
+
+
+def _run(source: Path, tmp_path: Path, **options: object) -> tuple[ReportGrid, Anonymizer]:
+    store = AliasStore.load(tmp_path / "map.json", seed=7)
+    anonymizer = Anonymizer(store, Options(**options))  # type: ignore[arg-type]
+    result = anonymizer.run(source.read_bytes())
+    return build_grid(parse_document(result)), anonymizer
+
+
+def _section_rows(grid: ReportGrid, title_prefix: str) -> list[list[str]]:
+    """Непустые строки секции, кроме подписи секции и шапок."""
+    return [
+        [value for value in grid.row_text(index) if value]
+        for index in range(len(grid.rows))
+        if (grid.sections.get(index) or "").startswith(title_prefix)
+        and not grid.is_section_row(index)
+        and not grid.is_header_row(index)
+        and any(grid.row_text(index))
+    ]
+
+
+def test_section_title_with_two_decimals_is_not_masked(tmp_path: Path) -> None:
+    """«5.10 Исполнение обязательств по сделке» подходит под форму денежного
+    числа и превращалось в «0 000.00 Исполнение обязательств по сделке»."""
+    report = """<html><body><table>
+     <tr><td colspan="3">5.10 Исполнение обязательств по сделке</td></tr>
+     <tr><td>Дата</td><td>Тип операции</td><td>Сумма</td><td>Валюта</td></tr>
+     <tr><td>05.08.2025</td><td>Покупка</td><td>1 234.56</td><td>RUR</td></tr>
+    </table></body></html>"""
+
+    store = AliasStore.load(tmp_path / "map.json", seed=7)
+    result = Anonymizer(store, Options()).run(report.encode("utf-8")).decode()
+
+    assert "5.10 Исполнение обязательств по сделке" in result
+    assert "1 234.56" not in result
+
+
+def test_sample_keeps_fraction_of_portfolio_rows(tmp_path: Path) -> None:
+    """Секция 2: пять бумаг, 0.7 — остаётся четыре, «Итого» на месте."""
+    grid, _ = _run(SAMPLING, tmp_path, sample=0.7)
+    rows = _section_rows(grid, "2. Состояние портфеля")
+
+    assert len([row for row in rows if row[0].startswith("БУМАГА")]) == 4
+    assert any(row[0].startswith("Итого") for row in rows)
+
+
+def test_sample_keeps_fraction_of_instruments_and_their_rows(tmp_path: Path) -> None:
+    """Секция 5: четыре выпуска → три; внутри выпуска из четырёх сделок → три.
+
+    Выпуск из двух сделок не трогается: правило «больше двух» применяется на
+    каждом уровне отдельно.
+    """
+    grid, _ = _run(SAMPLING, tmp_path, sample=0.7)
+    rows = _section_rows(grid, "5.1 Биржевые сделки")
+
+    groups = [row for row in rows if len(row) == 1 and row[0].startswith("ПАО")]
+    trades = [row for row in rows if row[0].startswith("B-")]
+    assert len(groups) == 3
+    assert len(trades) == 6  # 2 + 3 + 1
+
+    # У каждого оставшегося выпуска остался его «Итого по выпуску».
+    assert len([row for row in rows if row[0].startswith("Итого по выпуску")]) == 3
+    assert any(row[0].startswith("Общий итог") for row in rows)
+
+
+def test_dropped_instrument_leaves_no_trace(tmp_path: Path) -> None:
+    """Выпуск уходит целиком: без подзаголовка, сделок и своего итога.
+
+    Итог без сделок дал бы фикстуру, которой в природе не бывает.
+    """
+    grid, anonymizer = _run(SAMPLING, tmp_path, sample=0.7)
+    rows = _section_rows(grid, "5.1 Биржевые сделки")
+
+    headers = [row[0] for row in rows if len(row) == 1]
+    assert len(headers) == len(set(headers))
+    assert anonymizer.stats.dropped_groups["5.1 Биржевые сделки с ценными бумагами"] == 1
+
+
+def test_sample_keeps_fraction_of_cash_operations(tmp_path: Path) -> None:
+    """Секция 8: шесть операций → четыре."""
+    grid, _ = _run(SAMPLING, tmp_path, sample=0.7)
+    rows = _section_rows(grid, "8.1 Неторговые операции")
+
+    operations = [row for row in rows if len(row) >= 4]
+    assert len(operations) == 4
+
+
+def test_sample_does_not_touch_two_rows_or_fewer(tmp_path: Path) -> None:
+    """Правило из задачи: прореживать только там, где строк больше двух."""
+    grid, _ = _run(RAW, tmp_path, sample=0.5)
+    rows = _section_rows(grid, "2. Состояние портфеля")
+
+    assert len([row for row in rows if row[0].startswith("БУМАГА")]) == 2
+
+
+def test_sample_does_not_touch_other_sections(tmp_path: Path) -> None:
+    """Секция 1 — разложение остатка, а не список операций: её не прореживаем."""
+    grid, _ = _run(RAW, tmp_path, sample=0.5)
+    rows = _section_rows(grid, "1. Состояние денежных средств")
+
+    assert [row[0] for row in rows] == [
+        "Входящий остаток (всего):",
+        "0 000.00",
+        "Уплаченная комиссия и сборы, в том числе:",
+        "комиссия Брокера",
+        "комиссия Депозитария Брокера",
+        "Исходящий остаток:",
+    ]
+
+
+def test_sample_keeps_document_tail(tmp_path: Path) -> None:
+    """Подписи и дата формирования формально принадлежат последней секции, но
+    строками таблицы не являются."""
+    grid, _ = _run(SAMPLING, tmp_path, sample=0.7)
+    text = " ".join(
+        " ".join(grid.row_text(index)) for index in range(len(grid.rows))
+    )
+
+    assert "Клиент" in text
+    assert "Дата формирования отчета" in text
+
+
+def test_sample_is_deterministic(tmp_path: Path) -> None:
+    """Повторный прогон обязан дать ту же выборку: иначе фикстуру нельзя
+    пересоздать, а golden-тест на ней станет плавающим."""
+    options = {"sample": 0.7, "dates": "mask"}
+    first = Anonymizer(AliasStore.load(tmp_path / "a.json", seed=7), Options(**options))  # type: ignore[arg-type]
+    second = Anonymizer(AliasStore.load(tmp_path / "b.json", seed=99), Options(**options))  # type: ignore[arg-type]
+
+    assert first.run(SAMPLING.read_bytes()) == second.run(SAMPLING.read_bytes())
+
+
+def test_sample_accounting_matches_the_document(tmp_path: Path) -> None:
+    """Счётчик выброшенных строк сверяется с документом: на нём же стоит
+    проверка формы, и разошедшийся счётчик её ломает."""
+    store = AliasStore.load(tmp_path / "map.json", seed=7)
+    anonymizer = Anonymizer(store, Options(sample=0.7))
+    result = anonymizer.run(SAMPLING.read_bytes())
+
+    assert verify_structure(
+        SAMPLING.read_bytes(), result, dropped_rows=anonymizer.stats.dropped_rows
+    ) is None
+
+
+def test_sample_fraction_is_validated(tmp_path: Path) -> None:
+    code = main(
+        [
+            str(SAMPLING), "-o", str(tmp_path / "out.html"),
+            "--mapping", str(tmp_path / "map.json"),
+            "--sample", "1.5", "--quiet",
+        ]
+    )
+    assert code == 2
+
+
+def test_sample_via_cli(tmp_path: Path) -> None:
+    target = tmp_path / "out.html"
+    code = main(
+        [
+            str(SAMPLING), "-o", str(target),
+            "--mapping", str(tmp_path / "map.json"),
+            "--seed", "7", "--sample", "0.7", "--quiet",
+        ]
+    )
+
+    assert code == 0
+    grid = build_grid(parse_document(target.read_bytes()))
+    rows = _section_rows(grid, "2. Состояние портфеля")
+    assert len([row for row in rows if row[0].startswith("БУМАГА")]) == 4
