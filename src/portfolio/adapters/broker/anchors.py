@@ -15,11 +15,13 @@ from portfolio.adapters.formats import normalize_text
 
 __all__ = [
     "COLUMNS",
+    "COLUMNS_V2",
     "OPERATION_SIGNATURES",
     "SECTION_SIGNATURES",
     "TOTAL_ROW_MARKERS",
     "Section",
     "find_sections",
+    "is_known_column",
     "is_total_row",
     "match_direction",
     "match_operation_kind",
@@ -111,6 +113,64 @@ COLUMNS: dict[str, tuple[str, ...]] = {
     ),
     "opening_balance": ("входящий остаток", "остаток на начало", "начальный остаток"),
 }
+
+# Колонки выгрузки Excel (формат v2). Отдельный словарь, а не добавка к
+# `COLUMNS`: в v1 «дата поставки» — это дата расчётов, а здесь поставка бумаг и
+# оплата деньгами разнесены по разным парам колонок, и каждая пара ещё делится
+# на плановую и фактическую. Сводить оба формата в один словарь значит сделать
+# каждую новую формулировку риском для уже работающего разбора.
+COLUMNS_V2: dict[str, tuple[str, ...]] = {
+    # — общие —
+    "trade_date": ("дата сделки", "дата"),
+    "trade_time": ("время сделки", "время"),
+    "broker_trade_no": ("номер сделки",),
+    "direction": ("вид сделки",),
+    "venue": ("место совершения сделки", "место совершения"),
+    "currency": ("валюта",),
+    "comment": ("комментарий", "примечание"),
+    "operation_type": ("тип операции",),
+    # — бумага —
+    "instrument_name": ("наименование цб", "наименование"),
+    "issuer": ("эмитент",),
+    "isin": ("isin",),
+    "regnum": ("номер гос регистрации", "номер государственной регистрации"),
+    "storage": ("место хранения цб", "место хранения"),
+    # — количества и цены —
+    "quantity": ("количество цб", "количество"),
+    "opening_balance": ("количество цб на начало", "на начало периода"),
+    "closing_balance": ("количество цб на конец", "на конец периода"),
+    "quantity_in": ("зачислено цб",),
+    "quantity_out": ("списано цб",),
+    "pending_in": ("цб к зачислению",),
+    "pending_out": ("цб к выводу",),
+    "planned_quantity": ("плановое количество",),
+    "price": ("цена одной цб", "цена"),
+    "close_price": ("цена закрытия",),
+    "market_value": ("стоимость позиции",),
+    "share": ("доля цб в портфеле", "доля"),
+    "accrued_int": ("нкд", "накопленный купонный доход"),
+    # — деньги —
+    "amount": ("сумма сделки", "сумма"),
+    "price_currency": ("валюта цены",),
+    "amount_currency": ("валюта суммы",),
+    "rate": ("% по сделке", "по сделке"),
+    # — комиссии —
+    "fee_broker": ("брокерская комиссия",),
+    "fee_currency": ("валюта брокерской комиссии",),
+    "fee_exchange": ("комиссия тс", "комиссия торговой системы"),
+    "fee_stamp": ("гербовый сбор",),
+    "fee_depositary": ("депозитарная комиссия", "комиссия депозитария"),
+    # — даты расчётов: у каждой пары плановая и фактическая —
+    "settlement_date": ("дата оплаты фактическая", "дата оплаты"),
+    "settlement_planned": ("дата оплаты плановая",),
+    "delivery_date": ("дата поставки фактическая", "дата поставки"),
+    "delivery_planned": ("дата поставки плановая",),
+    # — виды сделок особых разделов —
+    "repo_kind": ("тип сделки репо",),
+    "loan_kind": ("тип сделки займа",),
+    "pending_kind": ("тип незавершенной сделки",),
+}
+
 
 # Маркеры строк, которые не являются операциями (спека 4.1).
 TOTAL_ROW_MARKERS: tuple[str, ...] = (
@@ -229,12 +289,28 @@ def _section_by_headers(table: RawTable) -> Section | None:
     return None
 
 
-def resolve_columns(table: RawTable) -> dict[str, str]:
+def is_known_column(text: str, columns: dict[str, tuple[str, ...]] | None = None) -> bool:
+    """Опознаётся ли текст как заголовок колонки.
+
+    Нужно не разбору, а нарезке плоской выгрузки на секции: строка-шапка тем и
+    отличается от строки данных, что её ячейки — известные заголовки.
+    """
+    signature = normalize_signature(text)
+    if not signature:
+        return False
+    table = columns if columns is not None else COLUMNS
+    return any(variant in signature for variants in table.values() for variant in variants)
+
+
+def resolve_columns(
+    table: RawTable, columns: dict[str, tuple[str, ...]] | None = None
+) -> dict[str, str]:
     """Логическое имя колонки → фактическое имя в `RawTable.as_dicts()`.
 
     Колонка выбирается по самому длинному совпавшему варианту: «дата расчетов»
     должна выиграть у «дата», иначе обе даты съедет в одну.
     """
+    vocabulary = columns if columns is not None else COLUMNS
     names = table.column_names()
     scored: dict[str, tuple[int, str]] = {}
 
@@ -242,7 +318,7 @@ def resolve_columns(table: RawTable) -> dict[str, str]:
         signature = normalize_signature(name)
         if not signature:
             continue
-        for logical, variants in COLUMNS.items():
+        for logical, variants in vocabulary.items():
             for variant in variants:
                 if variant in signature:
                     score = len(variant)
@@ -251,10 +327,14 @@ def resolve_columns(table: RawTable) -> dict[str, str]:
                         scored[logical] = (score, name)
 
     resolved = {logical: name for logical, (_, name) in scored.items()}
-    return _drop_duplicate_targets(resolved, names)
+    return _drop_duplicate_targets(resolved, names, vocabulary)
 
 
-def _drop_duplicate_targets(resolved: dict[str, str], names: list[str]) -> dict[str, str]:
+def _drop_duplicate_targets(
+    resolved: dict[str, str],
+    names: list[str],
+    vocabulary: dict[str, tuple[str, ...]],
+) -> dict[str, str]:
     """Одна физическая колонка не может обслуживать два логических имени.
 
     Побеждает более специфичное имя (длиннее совпавший вариант), второе
@@ -273,7 +353,7 @@ def _drop_duplicate_targets(resolved: dict[str, str], names: list[str]) -> dict[
         best = max(
             logicals,
             key=lambda logical: max(
-                (len(variant) for variant in COLUMNS[logical] if variant in signature),
+                (len(variant) for variant in vocabulary[logical] if variant in signature),
                 default=0,
             ),
         )

@@ -131,6 +131,9 @@ class FeeKind(enum.StrEnum):
     BROKER = "BROKER"
     DEPOSITARY = "DEPOSITARY"
     EXCHANGE = "EXCHANGE"
+    # Гербовый сбор: отдельная колонка в отчёте, отдельный вид и здесь.
+    # Свести его к OTHER значит потерять возможность сверить его отдельно.
+    STAMP = "STAMP"
     WITHDRAWAL = "WITHDRAWAL"
     OTHER = "OTHER"
 

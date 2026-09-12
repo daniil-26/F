@@ -16,7 +16,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "src"))
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from golden import dump, report_to_dict, tables_to_dict
-from portfolio.adapters.broker.mapping_v1 import parse
+from portfolio.adapters.broker.mapping import parse
 from portfolio.adapters.broker.tables import extract_tables
 
 FIXTURES = Path(__file__).parent / "fixtures"

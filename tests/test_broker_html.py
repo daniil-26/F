@@ -14,10 +14,13 @@ import pytest
 from conftest import FIXTURES
 from golden import load, report_to_dict, tables_to_dict
 from portfolio.adapters.broker.anchors import Section, find_sections, resolve_columns
-from portfolio.adapters.broker.mapping_v1 import parse, parse_report
+from portfolio.adapters.broker.mapping import parse, parse_report
 from portfolio.adapters.broker.tables import extract_tables
 
 REPORTS = sorted(FIXTURES.glob("*.html"))
+# Отчёты формата v1. Внутренняя согласованность проверяется через якоря v1, а у
+# выгрузки Excel другая раскладка — её проверяет `test_broker_v2.py`.
+V1_REPORTS = [report for report in REPORTS if "_v2_" not in report.stem]
 
 
 @pytest.mark.parametrize("report", REPORTS, ids=lambda path: path.stem)
@@ -44,7 +47,7 @@ def test_nothing_unrecognized(report: Path) -> None:
     assert unparsed == []
 
 
-@pytest.mark.parametrize("report", REPORTS, ids=lambda path: path.stem)
+@pytest.mark.parametrize("report", V1_REPORTS, ids=lambda path: path.stem)
 def test_report_balances_agree_with_operations(report: Path) -> None:
     """Сумма денежных эффектов сходится с движением остатка в самом отчёте.
 

@@ -1,0 +1,258 @@
+"""Формат v2: выгрузка Excel одной таблицей (STAGE-1, разведка архива).
+
+Отличия от v1, ради которых написан отдельный разбор: весь отчёт — одна
+таблица, разделы пронумерованы строками внутри неё, инструмент сделки стоит
+подзаголовком над группой, а шапки двухъярусные. Фикстура
+`report_v2_2024-03.html` повторяет раскладку реального архива.
+"""
+
+from __future__ import annotations
+
+from decimal import Decimal
+from pathlib import Path
+
+import pytest
+from typer.testing import CliRunner
+
+from conftest import FIXTURES
+from portfolio.adapters.broker.anchors import COLUMNS_V2, is_known_column
+from portfolio.adapters.broker.dto import ParsedOperation, ParsedReport
+from portfolio.adapters.broker.mapping import parse
+from portfolio.adapters.broker.mapping_v2 import MAPPING_VERSION, SKIPPED_SECTIONS
+from portfolio.adapters.broker.sections import split_sections
+from portfolio.adapters.broker.tables import extract_tables
+from portfolio.cli import app
+from portfolio.jobs.import_broker import import_broker_report
+
+runner = CliRunner()
+
+REPORT = FIXTURES / "report_v2_2024-03.html"
+OPENING_BALANCES = (
+    "id,account,date,ticker,isin,quantity,cost_basis,basis_quality,currency,note\n"
+    "ob-01,СЧЕТ-77,2024-02-29,,,100000.00,,known,RUB,остаток денег\n"
+    "ob-02,СЧЕТ-77,2024-02-29,ОФЗ 26238,RU000A1038V6,10,800.00,estimated,RUB,\n"
+    "ob-03,СЧЕТ-77,2024-02-29,Сбер ао,RU0009029540,100,250.00,estimated,RUB,\n"
+)
+
+
+@pytest.fixture(scope="module")
+def report() -> ParsedReport:
+    return parse(REPORT.read_bytes())
+
+
+def _of_kind(report: ParsedReport, kind: str) -> list[ParsedOperation]:
+    return [item for item in report.operations if item.kind == kind]
+
+
+# -- выбор версии и нарезка на разделы ---------------------------------------
+
+
+def test_dispatcher_picks_v2_by_document_shape(report: ParsedReport) -> None:
+    """Версия выбирается по форме документа, а не по дате или имени файла."""
+    assert report.mapping_version == MAPPING_VERSION
+
+    v1 = parse((FIXTURES / "report_2025-08.html").read_bytes())
+    assert v1.mapping_version == "v1"
+
+
+def test_flat_table_is_split_into_numbered_sections() -> None:
+    sections = split_sections(
+        extract_tables(REPORT.read_bytes()),
+        known_header=lambda text: is_known_column(text, COLUMNS_V2),
+    )
+
+    numbers = [section.number for section in sections]
+    assert numbers.count("") == 1, "преамбула с реквизитами — одна"
+    for expected in ("1", "2", "4", "5.1", "5.4", "5.10", "8.1.1", "8.2"):
+        assert expected in numbers
+
+
+def test_section_title_survives_extra_cells_in_its_row() -> None:
+    """«4. Оценка активов» делит строку с подписями колонок.
+
+    Если такую подпись не опознать, весь раздел уезжает в предыдущий и его
+    числа становятся остатками ценных бумаг.
+    """
+    sections = split_sections(
+        extract_tables(REPORT.read_bytes()),
+        known_header=lambda text: is_known_column(text, COLUMNS_V2),
+    )
+    assert any(section.number == "4" for section in sections)
+
+
+def test_evaluation_section_does_not_produce_balances(report: ParsedReport) -> None:
+    assert [balance.ticker for balance in report.balances if balance.kind == "security"] == [
+        "ОФЗ 26238",
+        "Сбер ао",
+    ]
+
+
+# -- сделки ------------------------------------------------------------------
+
+
+def test_instrument_comes_from_the_group_subheader(report: ParsedReport) -> None:
+    """A-23: в строке сделки бумаги нет, она в подзаголовке группы.
+
+    ISIN в подзаголовке тоже нет — он берётся из раздела 2 по наименованию и
+    номеру гос. регистрации.
+    """
+    buy = _of_kind(report, "BUY")[0]
+
+    assert buy.ticker == "Сбер ао"
+    assert buy.isin == "RU0009029540"
+
+
+def test_settlement_date_is_the_actual_one_not_the_planned(report: ParsedReport) -> None:
+    """Двухъярусная шапка: «Дата оплаты» → «Плановая | Фактическая» (A-03)."""
+    buy = _of_kind(report, "BUY")[0]
+
+    assert buy.trade_date.isoformat() == "2024-03-05"
+    assert buy.settlement_date is not None
+    assert buy.settlement_date.isoformat() == "2024-03-06"
+
+
+def test_accrued_interest_is_added_to_the_trade_amount(report: ParsedReport) -> None:
+    """A-07: НКД стоит отдельной колонкой, значит в сумму сделки не входит."""
+    sell = _of_kind(report, "SELL")[0]
+
+    assert sell.accrued_int == Decimal("25.00")
+    assert sell.amount == Decimal("4025.00")
+    assert sell.quantity == Decimal(-5)
+
+
+def test_fees_are_split_by_kind(report: ParsedReport) -> None:
+    fees = {(item.fee_kind, item.amount) for item in _of_kind(report, "FEE")}
+
+    assert ("BROKER", Decimal("-6.00")) in fees
+    assert ("EXCHANGE", Decimal("-0.60")) in fees
+
+
+def test_currency_of_money_is_the_settlement_currency(report: ParsedReport) -> None:
+    """Еврооблигация котируется в долларах, а рассчитывается в рублях.
+
+    Валюта денежного эффекта — «Валюта суммы сделки», не «Валюта цены».
+    """
+    assert {item.currency for item in report.operations} == {"RUB"}
+
+
+def test_totals_and_venue_turnover_are_not_trades(report: ParsedReport) -> None:
+    """«Итого по выпуску», «изменение» и обороты по площадкам — не сделки."""
+    assert len(_of_kind(report, "BUY")) == 2  # 5.1 и её же повтор в 5.10
+    assert len(_of_kind(report, "SELL")) == 1
+    assert report.unparsed == ()
+
+
+def test_loan_sections_are_skipped_deliberately(report: ParsedReport) -> None:
+    """A-24: заём бумаг не меняет ни позицию, ни остаток.
+
+    Пропуск именно осознанный: раздел перечислен с причиной, а его строки не
+    уходят ни в журнал, ни в нераспознанное.
+    """
+    assert "5.4" in SKIPPED_SECTIONS
+    assert all("займ" not in (item.note or "").lower() for item in report.operations)
+    assert report.unparsed == ()
+
+
+# -- неторговые операции -----------------------------------------------------
+
+
+def test_coupon_instrument_is_restored_from_the_comment(report: ParsedReport) -> None:
+    """В разделе 8.1.1 колонки бумаги нет — она названа в комментарии."""
+    coupon = _of_kind(report, "COUPON")[0]
+
+    assert coupon.amount == Decimal("35.00")
+    assert coupon.isin == "RU000A1038V6"
+
+
+def test_dividend_is_gross_and_tax_is_its_own_event(report: ParsedReport) -> None:
+    """A-04: налог приходит отдельной строкой, значит дивиденд показан до него."""
+    dividend = _of_kind(report, "DIVIDEND")[0]
+    tax = _of_kind(report, "TAX")[0]
+
+    assert dividend.amount == Decimal("1000.00")
+    assert dividend.withheld_at_source is False
+    assert tax.amount == Decimal("-130.00")
+
+
+def test_zero_bond_redemption_marker_is_skipped(report: ParsedReport) -> None:
+    """A-20: «Погашение облигации» идёт с нулевой суммой, деньги — «Погашение номинала»."""
+    maturity = _of_kind(report, "MATURITY")
+    amounts = sorted(item.amount for item in maturity)
+
+    assert amounts == [Decimal(0), Decimal("5000.00")]
+    assert all(item.amount != 0 or item.quantity is not None for item in maturity)
+
+
+def test_bond_redemption_writes_off_the_position(report: ParsedReport) -> None:
+    """Раздел 8.2 списывает бумаги, раздел 8.1.1 приносит за них деньги."""
+    written_off = [item for item in _of_kind(report, "MATURITY") if item.quantity is not None]
+
+    assert len(written_off) == 1
+    assert written_off[0].quantity == Decimal(-5)
+    assert written_off[0].amount == Decimal(0)
+
+
+# -- остаток денег -----------------------------------------------------------
+
+
+def test_cash_balance_is_the_actual_total_not_the_planned(report: ParsedReport) -> None:
+    """A-25: плановый остаток включает неисполненные обязательства."""
+    cash = [balance for balance in report.balances if balance.kind == "cash"]
+
+    assert len(cash) == 1
+    assert cash[0].quantity == Decimal("103919.00")
+    assert cash[0].currency == "RUB"
+
+
+def test_report_currency_rur_is_read_as_rub(report: ParsedReport) -> None:
+    """«RUR» — обозначение брокера, в журнале валюта одна и та же."""
+    assert all(balance.currency == "RUB" for balance in report.balances)
+
+
+def test_cash_movements_agree_with_the_reported_balance(report: ParsedReport) -> None:
+    """Внутренняя согласованность фикстуры: 100 000 + движения = 103 919.
+
+    Повтор сделки из раздела 5.10 в сумму не входит: это то же событие (A-22),
+    и в журнале оно одно.
+    """
+    seen: set[str | None] = set()
+    movement = Decimal(0)
+    for item in report.operations:
+        key = f"{item.broker_trade_no}:{item.kind}:{item.fee_kind}"
+        if item.broker_trade_no and key in seen:
+            continue
+        seen.add(key)
+        movement += item.amount
+
+    closing = next(item.quantity for item in report.balances if item.kind == "cash")
+    assert Decimal("100000.00") + movement == closing
+
+
+# -- импорт целиком ----------------------------------------------------------
+
+
+def test_import_reconciles_end_to_end(database: Path, tmp_path: Path) -> None:
+    """Главный критерий: отчёт нового формата импортируется и сходится."""
+    opening = tmp_path / "opening_balances.csv"
+    opening.write_text(OPENING_BALANCES, encoding="utf-8")
+
+    assert runner.invoke(app, ["import-csv", str(opening)]).exit_code == 0
+    result = runner.invoke(app, ["import-broker", str(REPORT)])
+
+    assert result.exit_code == 0, result.stdout
+    assert runner.invoke(app, ["check"]).exit_code == 0
+
+
+def test_trade_repeated_in_section_5_10_is_written_once(database: Path, tmp_path: Path) -> None:
+    """A-22: сделка стоит и в 5.1, и в 5.10 — ключ идемпотентности их схлопывает.
+
+    Повтор виден в дифф как «уже в журнале»: покупка и две её комиссии.
+    """
+    opening = tmp_path / "opening_balances.csv"
+    opening.write_text(OPENING_BALANCES, encoding="utf-8")
+    runner.invoke(app, ["import-csv", str(opening)])
+
+    result = import_broker_report(REPORT)
+
+    assert result.committed
+    assert result.diff.summary() == {"new": 11, "unchanged": 3, "reversals": 0}

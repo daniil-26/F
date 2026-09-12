@@ -23,7 +23,7 @@ from sqlalchemy import select
 from sqlalchemy.orm import Session
 
 from portfolio.adapters.broker.dto import ParsedBalance, ParsedOperation, UnparsedRow
-from portfolio.adapters.broker.mapping_v1 import MAPPING_VERSION, parse
+from portfolio.adapters.broker.mapping import MAPPING_VERSION, parse
 from portfolio.adapters.files import discover_reports
 from portfolio.config import Settings, get_settings
 from portfolio.db import session_scope
