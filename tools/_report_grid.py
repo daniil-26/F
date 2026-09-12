@@ -41,10 +41,70 @@ __all__ = [
     "has_total_marker",
     "header_name",
     "is_total_marker",
+    "iter_report_files",
     "load_grid",
     "normalize_text",
     "parse_document",
 ]
+
+
+# Брокеры отдают HTML-выгрузку и под расширением .xls — это не бинарный Excel,
+# а та же таблица, поэтому расширение само по себе ничего не решает.
+REPORT_SUFFIXES = (".html", ".htm", ".xls")
+
+
+def iter_report_files(
+    paths: list[Path],
+    *,
+    recursive: bool = False,
+    pattern: str | None = None,
+    skip_suffixes: tuple[str, ...] = (),
+) -> tuple[list[Path], list[str]]:
+    """Разворачивает список путей: файл берётся как есть, каталог — по содержимому.
+
+    Возвращает найденные файлы и заметки о пропущенном: «файла нет», «отчётов не
+    найдено». Заметки печатает вызывающая сторона — молча проигнорированный
+    аргумент хуже, чем лишняя строка в выводе.
+    """
+    found: list[Path] = []
+    notes: list[str] = []
+
+    for entry in paths:
+        if entry.is_dir():
+            inside = _reports_inside(entry, recursive=recursive, pattern=pattern,
+                                     skip_suffixes=skip_suffixes)
+            if not inside:
+                notes.append(f"{entry}: отчётов не найдено")
+            found.extend(inside)
+            continue
+        if not entry.exists():
+            notes.append(f"{entry}: файла нет")
+            continue
+        found.append(entry)
+
+    return found, notes
+
+
+def _reports_inside(
+    directory: Path,
+    *,
+    recursive: bool,
+    pattern: str | None,
+    skip_suffixes: tuple[str, ...],
+) -> list[Path]:
+    mask = pattern or "*"
+    entries = directory.rglob(mask) if recursive else directory.glob(mask)
+
+    result: list[Path] = []
+    for path in sorted(entries):
+        if not path.is_file():
+            continue
+        if any(path.name.endswith(suffix) for suffix in skip_suffixes):
+            continue
+        if pattern is None and path.suffix.lower() not in REPORT_SUFFIXES:
+            continue
+        result.append(path)
+    return result
 
 
 @dataclass

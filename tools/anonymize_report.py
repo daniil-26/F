@@ -80,6 +80,7 @@ from typing import Any
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _report_grid import (
+    REPORT_SUFFIXES,
     GridCell,
     ReportGrid,
     build_grid,
@@ -88,6 +89,7 @@ from _report_grid import (
     is_date,
     is_number,
     is_time,
+    iter_report_files,
     normalize_text,
     parse_document,
 )
@@ -1082,9 +1084,6 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-# Брокеры отдают HTML-выгрузку и под расширением .xls — это не бинарный Excel,
-# а та же таблица, поэтому расширение само по себе ничего не решает.
-REPORT_SUFFIXES = (".html", ".htm", ".xls")
 ANON_SUFFIX = ".anon.html"
 
 
@@ -1109,19 +1108,17 @@ def collect_jobs(args: argparse.Namespace) -> tuple[list[Job], list[str]]:
     seen_targets: dict[Path, Path] = {}
 
     for entry in args.files:
-        if entry.is_dir():
-            found = _reports_in(entry, args, notes)
-            if not found:
-                notes.append(f"{entry}: отчётов не найдено")
-            for source in found:
-                jobs.append(Job(source=source, target=_target_for(source, entry, args)))
-            continue
-
-        if not entry.exists():
-            notes.append(f"{entry}: файла нет")
-            continue
-
-        jobs.append(Job(source=entry, target=_target_for(entry, entry.parent, args)))
+        root = entry if entry.is_dir() else entry.parent
+        found, entry_notes = iter_report_files(
+            [entry],
+            recursive=args.recursive,
+            pattern=args.pattern,
+            # Результат предыдущего прогона: обезличивать его повторно
+            # бессмысленно, а в каталоге он лежит рядом с исходниками.
+            skip_suffixes=(ANON_SUFFIX,),
+        )
+        notes.extend(entry_notes)
+        jobs.extend(Job(source=source, target=_target_for(source, root, args)) for source in found)
 
     if args.out is not None:
         # С --out все задания метят в один файл. Схлопывать их в одно нельзя:
@@ -1140,26 +1137,6 @@ def collect_jobs(args: argparse.Namespace) -> tuple[list[Job], list[str]]:
         seen_targets[job.target] = job.source
         unique.append(job)
     return unique, notes
-
-
-def _reports_in(directory: Path, args: argparse.Namespace, notes: list[str]) -> list[Path]:
-    pattern = args.pattern or "*"
-    entries = directory.rglob(pattern) if args.recursive else directory.glob(pattern)
-
-    found: list[Path] = []
-    for path in sorted(entries):
-        if not path.is_file():
-            continue
-        if path.name.endswith(ANON_SUFFIX):
-            # Результат предыдущего прогона: обезличивать его повторно
-            # бессмысленно, а в каталоге он лежит рядом с исходниками.
-            continue
-        if args.pattern is None and path.suffix.lower() not in REPORT_SUFFIXES:
-            continue
-        found.append(path)
-
-    _ = notes
-    return found
 
 
 def _target_for(source: Path, root: Path, args: argparse.Namespace) -> Path:
@@ -1307,7 +1284,8 @@ def _encoding_warnings(source: Path, content: bytes) -> list[str]:
         warnings.append(
             f"{source}: текст похож на испорченную кодировку "
             f"(доля посторонних символов {choice.garbage_ratio:.0%}) — "
-            "скорее всего файл был сломан до обезличивания, проверьте исходник"
+            "файл сломан до обезличивания. Починить: "
+            "python tools/fix_encoding.py <файл>"
         )
     return warnings
 
