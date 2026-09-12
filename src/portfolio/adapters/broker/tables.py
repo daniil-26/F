@@ -15,7 +15,9 @@ from lxml import html as lxml_html
 from portfolio.adapters.formats import normalize_text
 
 __all__ = [
+    "HEADER_SEPARATOR",
     "EncodingChoice",
+    "RawCell",
     "RawTable",
     "decode_report",
     "detect_encoding",
@@ -37,6 +39,9 @@ _ALLOWED_NON_ASCII = frozenset("«»„“”‘’—–…\u00a0\u202f\u2009�
 # Доля «посторонних» неASCII-символов, выше которой текст считается испорченным.
 # У правильного русского текста она около нуля, у перепутанной кодировки — под половину.
 _GARBAGE_THRESHOLD = 0.15
+
+# Разделитель частей составного заголовка: «Дата оплаты · Плановая».
+HEADER_SEPARATOR = " · "
 
 
 @dataclass(frozen=True)
@@ -61,6 +66,27 @@ class EncodingChoice:
 
 
 @dataclass(frozen=True)
+class RawCell:
+    """Ячейка с её местом в сетке таблицы.
+
+    `column` — номер колонки после разворачивания объединений, а не порядковый
+    номер ячейки в строке. Различие принципиально: в отчёте-выгрузке Excel
+    заголовок «Дата оплаты» занимает две колонки, и без учёта объединений
+    «Место совершения сделки» из шапки оказывается над «Дата поставки
+    фактическая» в данных.
+    """
+
+    text: str
+    column: int
+    colspan: int = 1
+    rowspan: int = 1
+
+    @property
+    def columns(self) -> range:
+        return range(self.column, self.column + self.colspan)
+
+
+@dataclass(frozen=True)
 class RawTable:
     """Таблица документа без интерпретации: заголовки и ячейки строками."""
 
@@ -69,9 +95,22 @@ class RawTable:
     headers: tuple[str, ...]
     rows: tuple[tuple[str, ...], ...]
     preceding_text: tuple[str, ...] = field(default=())
+    # Те же заголовки и строки, но с номерами колонок сетки. Пустые кортежи
+    # означают таблицу без объединений — тогда номер колонки равен позиции.
+    # Шапка хранится строками: под объединённой «Дата оплаты» стоят «Плановая»
+    # и «Фактическая», и только вместе они называют колонку однозначно.
+    header_rows: tuple[tuple[RawCell, ...], ...] = field(default=())
+    row_cells: tuple[tuple[RawCell, ...], ...] = field(default=())
+    grid_width: int = 0
+
+    @property
+    def header_cells(self) -> tuple[RawCell, ...]:
+        return self.header_rows[0] if self.header_rows else ()
 
     @property
     def width(self) -> int:
+        if self.grid_width:
+            return self.grid_width
         return max(
             (len(row) for row in self.rows),
             default=len(self.headers),
@@ -81,34 +120,76 @@ class RawTable:
     def is_empty(self) -> bool:
         return not self.rows and not self.headers
 
+    @property
+    def has_merged_cells(self) -> bool:
+        return any(
+            cell.colspan > 1 or cell.rowspan > 1
+            for row in (*self.row_cells, *self.header_rows)
+            for cell in row
+        )
+
     def as_dicts(self) -> list[dict[str, str]]:
         """Строки как отображение «заголовок → ячейка».
 
-        Колонки без заголовка получают позиционное имя `col_3`: терять их нельзя,
-        именно в них у брокеров иногда приезжает признак сделки.
+        Колонка ячейки сопоставляется с колонкой заголовка по сетке, а не по
+        порядковому номеру: иначе объединённые ячейки сдвигают данные
+        относительно шапки. Колонки без заголовка получают позиционное имя
+        `col_3` — терять их нельзя, именно в них у брокеров иногда приезжает
+        признак сделки.
         """
         names = self._column_names()
         result: list[dict[str, str]] = []
-        for row in self.rows:
+
+        for index, row in enumerate(self.rows):
+            cells = self.row_cells[index] if index < len(self.row_cells) else ()
             item: dict[str, str] = {}
-            for position, cell in enumerate(row):
-                name = names[position] if position < len(names) else f"col_{position}"
-                item[name] = cell
+            for position, text in enumerate(row):
+                column = cells[position].column if position < len(cells) else position
+                name = names.get(column) or f"col_{column}"
+                item[name] = text
             result.append(item)
         return result
 
-    def _column_names(self) -> list[str]:
-        names: list[str] = []
+    def column_names(self) -> list[str]:
+        """Имена колонок по порядку сетки — то, чем размечены строки `as_dicts`."""
+        names = self._column_names()
+        return [names[column] for column in sorted(names)]
+
+    def _column_names(self) -> dict[int, str]:
+        """Номер колонки сетки → имя.
+
+        Имя собирается по всем строкам шапки сверху вниз: объединённая
+        «Дата оплаты» плюс уточнение «Плановая» дают «Дата оплаты · Плановая».
+        Без уточнения обе колонки назывались бы одинаково, и вторая затирала бы
+        первую в `as_dicts`.
+        """
+        header_rows = self.header_rows or (
+            tuple(
+                RawCell(text=text, column=position)
+                for position, text in enumerate(self.headers)
+            ),
+        )
+
+        parts: dict[int, list[str]] = {}
+        for row in header_rows:
+            for cell in row:
+                if not cell.text:
+                    continue
+                for column in cell.columns:
+                    chain = parts.setdefault(column, [])
+                    if cell.text not in chain:
+                        chain.append(cell.text)
+
+        names: dict[int, str] = {}
         seen: dict[str, int] = {}
-        for position in range(self.width):
-            raw = self.headers[position] if position < len(self.headers) else ""
-            name = raw or f"col_{position}"
-            if name in seen:
-                seen[name] += 1
-                name = f"{name}__{seen[name]}"
+        for column in range(max(self.width, max(parts, default=-1) + 1)):
+            base = HEADER_SEPARATOR.join(parts.get(column, ())) or f"col_{column}"
+            if base in seen:
+                seen[base] += 1
+                names[column] = f"{base}__{seen[base]}"
             else:
-                seen[name] = 0
-            names.append(name)
+                seen[base] = 0
+                names[column] = base
         return names
 
 
@@ -212,53 +293,101 @@ def extract_tables(content: bytes) -> list[RawTable]:
     tables: list[RawTable] = []
 
     for index, element in enumerate(document.iter("table")):
-        headers, rows = _rows_of(element)
+        header_rows, row_cells = _rows_of(element)
         tables.append(
             RawTable(
                 index=index,
                 caption=_caption_of(element),
-                headers=headers,
-                rows=rows,
+                headers=tuple(cell.text for cell in header_rows[0]) if header_rows else (),
+                rows=tuple(tuple(cell.text for cell in row) for row in row_cells),
                 preceding_text=_preceding_text(element),
+                header_rows=header_rows,
+                row_cells=row_cells,
+                grid_width=_grid_width(header_rows, row_cells),
             )
         )
     return tables
 
 
-def _rows_of(table: lxml_html.HtmlElement) -> tuple[tuple[str, ...], tuple[tuple[str, ...], ...]]:
+def _grid_width(
+    header_rows: tuple[tuple[RawCell, ...], ...],
+    row_cells: tuple[tuple[RawCell, ...], ...],
+) -> int:
+    return max(
+        (cell.column + cell.colspan for row in (*row_cells, *header_rows) for cell in row),
+        default=0,
+    )
+
+
+def _rows_of(
+    table: lxml_html.HtmlElement,
+) -> tuple[tuple[tuple[RawCell, ...], ...], tuple[tuple[RawCell, ...], ...]]:
     """Строки, принадлежащие именно этой таблице, а не вложенной в неё.
 
-    Отчёты брокеров верстаются таблицами, вложенность обычна. Строка относится
-    к ближайшему предку `table`.
-    """
-    collected: list[tuple[str, ...]] = []
-    header: tuple[str, ...] = ()
-    header_taken = False
+    Отчёты брокеров верстаются таблицами, вложенность обычна: строка относится к
+    ближайшему предку `table`, ячейка — к ближайшей `tr`.
 
-    for row in table.iter("tr"):
-        if _nearest_table(row) is not table:
-            continue
+    Каждая ячейка получает номер колонки **сетки**: `colspan` сдвигает соседей
+    вправо, `rowspan` занимает место в следующих строках. Без этого объединённая
+    шапка выгрузки Excel не совпадает со своими же данными.
+    """
+    collected: list[tuple[RawCell, ...]] = []
+    header_rows: list[tuple[RawCell, ...]] = []
+    occupied: dict[tuple[int, int], bool] = {}
+
+    rows = [row for row in table.iter("tr") if _nearest_table(row) is table]
+    for index, row in enumerate(rows):
         cells = [cell for cell in row.iter("td", "th") if _nearest_row(cell) is row]
         if not cells:
             continue
-        values = tuple(_cell_text(cell) for cell in cells)
 
-        is_header_row = not header_taken and all(cell.tag == "th" for cell in cells)
+        placed: list[RawCell] = []
+        column = 0
+        for cell in cells:
+            while (index, column) in occupied:
+                column += 1
+            colspan = _span(cell, "colspan")
+            rowspan = _span(cell, "rowspan")
+            for delta_row in range(rowspan):
+                for delta_column in range(colspan):
+                    occupied[(index + delta_row, column + delta_column)] = True
+            placed.append(
+                RawCell(
+                    text=_cell_text(cell),
+                    column=column,
+                    colspan=colspan,
+                    rowspan=rowspan,
+                )
+            )
+            column += colspan
+
+        # Шапка бывает многострочной: под объединённой «Дата оплаты» стоят
+        # «Плановая» и «Фактическая». Пока строки состоят из одних <th> и данных
+        # ещё не было, они все относятся к шапке.
+        is_header_row = not collected and all(cell.tag == "th" for cell in cells)
         if is_header_row:
-            header = values
-            header_taken = True
+            header_rows.append(tuple(placed))
             continue
-        collected.append(values)
+        collected.append(tuple(placed))
 
-    if not header_taken and collected:
+    if not header_rows and collected:
         # Заголовки без <th> — обычное дело. Первая строка считается заголовком,
         # только если в ней нет чисел: иначе это данные.
         first = collected[0]
-        if first and not any(_looks_numeric(cell) for cell in first):
-            header = first
+        if first and not any(_looks_numeric(cell.text) for cell in first):
+            header_rows.append(first)
             collected = collected[1:]
 
-    return header, tuple(collected)
+    return tuple(header_rows), tuple(collected)
+
+
+def _span(element: lxml_html.HtmlElement, name: str) -> int:
+    raw = (element.get(name) or "1").strip()
+    try:
+        return max(1, int(raw))
+    except ValueError:
+        # Брокер иногда печатает colspan="" — это одна колонка, а не ошибка.
+        return 1
 
 
 def _nearest_table(element: lxml_html.HtmlElement) -> lxml_html.HtmlElement | None:
