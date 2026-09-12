@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import json
 import sys
+from collections import Counter
 from datetime import date
 from pathlib import Path
 
@@ -172,6 +173,51 @@ def test_aliases_are_stable_across_runs(tmp_path: Path) -> None:
     reloaded = AliasStore.load(mapping, seed=999)
     assert reloaded.date_offset_days == first.store.date_offset_days
     assert reloaded.aliases == first.store.aliases
+
+
+FOREIGN = """<html><body><table>
+ <tr><td>Наименование ЦБ</td><td>Эмитент</td><td>Номер гос. регистрации</td><td>ISIN</td>
+     <td>Количество ЦБ на конец периода, шт.</td><td>Цена закрытия одной ЦБ</td></tr>
+ <tr><td>Apple</td><td>Apple Inc.</td><td>1-02-00100-A</td><td>US0378331005</td>
+     <td>10</td><td>190.50</td></tr>
+ <tr><td>Сбербанк</td><td>ПАО "Сбербанк России"</td><td>10301481B</td><td>RU0009029540</td>
+     <td>100</td><td>318.45</td></tr>
+</table></body></html>"""
+
+
+def test_foreign_isin_pseudonym_keeps_country_code(tmp_path: Path) -> None:
+    """Код страны сохраняется: по нему видно, что бумага иностранная."""
+    store = AliasStore.load(tmp_path / "map.json", seed=7)
+    result = Anonymizer(store, Options()).run(FOREIGN.encode("utf-8")).decode()
+
+    assert "US000Z" in result
+    assert "US0378331005" not in result
+
+
+def test_foreign_isin_pseudonym_is_not_a_residual_suspicion(tmp_path: Path) -> None:
+    """Собственный псевдоним не должен попадать в остаточные подозрения.
+
+    Проверка на литерал «RU000Z» объявляла подозрительными псевдонимы всех
+    иностранных бумаг, и в отчёте по архиву их были десятки — шум, из-за
+    которого настоящую находку не заметить.
+    """
+    store = AliasStore.load(tmp_path / "map.json", seed=7)
+    anonymizer = Anonymizer(store, Options())
+    anonymizer.run(FOREIGN.encode("utf-8"))
+
+    assert anonymizer.stats.residual == Counter()
+
+
+def test_foreign_isin_pseudonym_is_not_realiased(tmp_path: Path) -> None:
+    """Повторный прогон не должен переименовывать US000Z… в новый псевдоним:
+    иначе фикстуры разных месяцев расходятся."""
+    store = AliasStore.load(tmp_path / "map.json", seed=7)
+    options = Options(dates="mask")
+    once = Anonymizer(store, options).run(FOREIGN.encode("utf-8"))
+    twice = Anonymizer(store, options).run(once)
+
+    assert once == twice
+    assert len(store.aliases["isin"]) == 2
 
 
 def test_keep_instruments_keeps_isin(tmp_path: Path) -> None:
