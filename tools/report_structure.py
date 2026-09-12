@@ -39,6 +39,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from _report_grid import (
     ReportGrid,
+    detect_encoding,
     has_total_marker,
     is_date,
     is_number,
@@ -66,6 +67,9 @@ class SectionInfo:
 @dataclass
 class Inventory:
     path: Path
+    encoding: str
+    declared_encoding: str | None
+    garbage_ratio: float
     rows: int
     width: int
     period: str | None
@@ -77,6 +81,9 @@ class Inventory:
     def as_dict(self) -> dict[str, object]:
         return {
             "file": self.path.name,
+            "encoding": self.encoding,
+            "declared_encoding": self.declared_encoding,
+            "garbage_ratio": round(self.garbage_ratio, 3),
             "rows": self.rows,
             "width": self.width,
             "period": self.period,
@@ -100,8 +107,12 @@ def collect(path: Path) -> Inventory:
     sections = _sections(grid)
     values = _values(grid)
 
+    choice = detect_encoding(path.read_bytes())
     return Inventory(
         path=path,
+        encoding=choice.name,
+        declared_encoding=choice.declared,
+        garbage_ratio=choice.garbage_ratio,
         rows=len(grid.rows),
         width=grid.width,
         period=_period(grid),
@@ -210,6 +221,14 @@ def _looks_anonymized(grid: ReportGrid) -> bool:
 
 def print_dump(inventory: Inventory) -> None:
     print(f"\n=== {inventory.path}")
+    declared = inventory.declared_encoding or "не объявлена"
+    mismatch = " ← не совпадает с содержимым" if _lies(inventory) else ""
+    print(f"кодировка: {inventory.encoding} (объявлена: {declared}){mismatch}")
+    if inventory.garbage_ratio > 0.15:
+        print(
+            f"ВНИМАНИЕ: посторонних символов {inventory.garbage_ratio:.0%} — "
+            "текст похож на испорченную кодировку"
+        )
     print(f"строк: {inventory.rows}, ширина сетки: {inventory.width}")
     print(f"период: {inventory.period or '— не найден'}")
     print(f"обезличен: {'да' if inventory.anonymized else 'похоже, нет'}")
@@ -227,6 +246,19 @@ def print_dump(inventory: Inventory) -> None:
         print(f"\n{name} ({len(values)}):")
         for value in values:
             print(f"  • {value}")
+
+
+def _lies(inventory: Inventory) -> bool:
+    import codecs
+
+    if inventory.declared_encoding is None:
+        return False
+    try:
+        return codecs.lookup(inventory.declared_encoding).name != codecs.lookup(
+            inventory.encoding
+        ).name
+    except LookupError:
+        return True
 
 
 def print_compare(inventories: list[Inventory]) -> None:

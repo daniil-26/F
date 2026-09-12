@@ -14,12 +14,50 @@ from lxml import html as lxml_html
 
 from portfolio.adapters.formats import normalize_text
 
-__all__ = ["RawTable", "decode_report", "extract_tables"]
+__all__ = [
+    "EncodingChoice",
+    "RawTable",
+    "decode_report",
+    "detect_encoding",
+    "extract_tables",
+    "garbage_ratio",
+]
 
 _META_CHARSET_RE = re.compile(rb"""charset=["']?\s*([A-Za-z0-9_\-]+)""", re.IGNORECASE)
 
 # Кодировки в порядке убывания вероятности для российских отчётов.
 _FALLBACK_ENCODINGS = ("utf-8", "cp1251", "koi8-r")
+
+_RUSSIAN_LETTERS = frozenset(
+    "абвгдеёжзийклмнопрстуфхцчшщъыьэюяАБВГДЕЁЖЗИЙКЛМНОПРСТУФХЦЧШЩЪЫЬЭЮЯ"
+)
+# Типографика, законная в отчёте: кавычки, тире, неразрывные пробелы, знаки валют.
+_ALLOWED_NON_ASCII = frozenset("«»„“”‘’—–…\u00a0\u202f\u2009№°±§©®™€₽$¢£¥µ·•")
+
+# Доля «посторонних» неASCII-символов, выше которой текст считается испорченным.
+# У правильного русского текста она около нуля, у перепутанной кодировки — под половину.
+_GARBAGE_THRESHOLD = 0.15
+
+
+@dataclass(frozen=True)
+class EncodingChoice:
+    """Выбранная кодировка и то, на чём основан выбор."""
+
+    name: str
+    declared: str | None
+    garbage_ratio: float
+
+    @property
+    def declaration_lies(self) -> bool:
+        """Документ объявил одну кодировку, а читается в другой."""
+        if self.declared is None:
+            return False
+        return _canonical(self.declared) != _canonical(self.name)
+
+    @property
+    def suspicious(self) -> bool:
+        """Даже лучший вариант выглядит испорченным — файл сломан до нас."""
+        return self.garbage_ratio > _GARBAGE_THRESHOLD
 
 
 @dataclass(frozen=True)
@@ -74,26 +112,94 @@ class RawTable:
         return names
 
 
-def decode_report(content: bytes) -> str:
-    """Декодирует отчёт, уважая объявленную в документе кодировку.
+def garbage_ratio(text: str) -> float:
+    """Доля неASCII-символов, не являющихся русскими буквами или типографикой.
 
-    Отчёты приходят и в UTF-8, и в CP1251; ошибка здесь превращает кириллицу в
-    мусор, и якоря перестают находиться.
+    Мера испорченности текста. У верно прочитанного отчёта она около нуля; у
+    UTF-8, прочитанного как CP1251, — около половины: «Состояние» превращается в
+    «РЎРѕСЃС‚РѕСЏРЅРёРµ», где половина знаков — белорусские и сербские буквы,
+    которых в русском отчёте быть не может.
     """
-    declared = _META_CHARSET_RE.search(content[:4096])
+    foreign = [char for char in text if not char.isascii()]
+    if not foreign:
+        return 0.0
+    bad = sum(
+        1
+        for char in foreign
+        if char not in _RUSSIAN_LETTERS and char not in _ALLOWED_NON_ASCII
+    )
+    return bad / len(foreign)
+
+
+def detect_encoding(content: bytes) -> EncodingChoice:
+    """Выбирает кодировку по качеству результата, а не по объявлению.
+
+    Объявлению доверять нельзя: файл, сохранённый в UTF-8 со старой метой
+    `charset=windows-1251`, читается как CP1251 без единой ошибки — CP1251
+    определён почти на всех байтах. Русский текст при этом превращается в
+    «РЎРѕСЃС‚РѕСЏРЅРёРµ», и дальше по цепочке ломается всё: якоря не находятся,
+    секции не опознаются, обезличенная фикстура уносит мусор в git.
+
+    Поэтому все правдоподобные кодировки пробуются, а выбирается та, чей
+    результат меньше похож на мусор. Объявленная идёт первой и выигрывает при
+    равном качестве.
+    """
+    declared_match = _META_CHARSET_RE.search(content[:4096])
+    declared = (
+        declared_match.group(1).decode("ascii", "ignore").lower()
+        if declared_match
+        else None
+    )
+
+    # Валидная многобайтная UTF-8 — это UTF-8, что бы ни объявляла мета.
+    # Русский текст в CP1251 почти никогда не оказывается валидным UTF-8, а вот
+    # обратное — файл в UTF-8 со старой метой — встречается постоянно.
+    utf8 = "utf-8-sig" if content.startswith(b"\xef\xbb\xbf") else "utf-8"
+    try:
+        text = content.decode(utf8)
+    except (UnicodeDecodeError, ValueError):
+        pass
+    else:
+        if not text.isascii():
+            return EncodingChoice(
+                name=utf8, declared=declared, garbage_ratio=garbage_ratio(text)
+            )
+
     candidates: list[str] = []
     if declared:
-        candidates.append(declared.group(1).decode("ascii", "ignore").lower())
+        candidates.append(declared)
     candidates.extend(_FALLBACK_ENCODINGS)
 
+    best: EncodingChoice | None = None
     for encoding in candidates:
-        if not encoding:
-            continue
         try:
-            return content.decode(encoding)
-        except (LookupError, UnicodeDecodeError):
+            text = content.decode(encoding)
+        except (LookupError, UnicodeDecodeError, ValueError):
             continue
-    return content.decode("utf-8", errors="replace")
+        ratio = garbage_ratio(text)
+        if best is None or ratio < best.garbage_ratio:
+            best = EncodingChoice(name=encoding, declared=declared, garbage_ratio=ratio)
+        if best.garbage_ratio == 0.0:
+            break
+
+    if best is None:
+        return EncodingChoice(name="utf-8", declared=declared, garbage_ratio=1.0)
+    return best
+
+
+def decode_report(content: bytes) -> str:
+    """Декодирует отчёт. Кодировка определяется по качеству результата."""
+    choice = detect_encoding(content)
+    return content.decode(choice.name, errors="replace")
+
+
+def _canonical(encoding: str) -> str:
+    import codecs
+
+    try:
+        return codecs.lookup(encoding).name
+    except LookupError:
+        return encoding.strip().lower()
 
 
 def extract_tables(content: bytes) -> list[RawTable]:

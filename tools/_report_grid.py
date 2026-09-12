@@ -24,7 +24,10 @@ if str(_SRC) not in sys.path:  # запуск без `pip install -e .`
 
 from lxml import html as lxml_html  # noqa: E402
 
-from portfolio.adapters.broker.tables import decode_report  # noqa: E402
+from portfolio.adapters.broker.tables import (  # noqa: E402
+    decode_report,
+    detect_encoding,
+)
 from portfolio.adapters.formats import normalize_text  # noqa: E402
 
 __all__ = [
@@ -34,6 +37,7 @@ __all__ = [
     "ReportGrid",
     "build_grid",
     "decode_report",
+    "detect_encoding",
     "has_total_marker",
     "header_name",
     "is_total_marker",

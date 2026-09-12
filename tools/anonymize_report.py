@@ -83,6 +83,7 @@ from _report_grid import (
     GridCell,
     ReportGrid,
     build_grid,
+    detect_encoding,
     has_total_marker,
     is_date,
     is_number,
@@ -1242,6 +1243,9 @@ def main(argv: list[str] | None = None) -> int:
             skipped += 1
             continue
 
+        for warning in _encoding_warnings(job.source, content):
+            print(warning, file=sys.stderr)
+
         anonymizer = Anonymizer(store, options)
         try:
             result = anonymizer.run(content)
@@ -1282,6 +1286,30 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     return 1 if failures else 0
+
+
+def _encoding_warnings(source: Path, content: bytes) -> list[str]:
+    """Сообщить о кодировке до того, как мусор уедет в фикстуру.
+
+    Оба случая тихие: файл в UTF-8 со старой метой `windows-1251` читается без
+    единой ошибки, а уже испорченный файл выглядит как обычный текст — просто
+    не по-русски.
+    """
+    choice = detect_encoding(content)
+    warnings: list[str] = []
+
+    if choice.declaration_lies:
+        warnings.append(
+            f"{source}: документ объявляет {choice.declared}, прочитан как "
+            f"{choice.name} — объявление не совпадает с содержимым"
+        )
+    if choice.suspicious:
+        warnings.append(
+            f"{source}: текст похож на испорченную кодировку "
+            f"(доля посторонних символов {choice.garbage_ratio:.0%}) — "
+            "скорее всего файл был сломан до обезличивания, проверьте исходник"
+        )
+    return warnings
 
 
 def _looks_like_report(content: bytes) -> bool:
