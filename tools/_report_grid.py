@@ -6,7 +6,8 @@
 объединений «Место совершения сделки» из шапки оказывается над «Дата поставки
 фактическая» в данных.
 
-Модуль сознательно не зависит от `portfolio.adapters` (кроме декодирования):
+Модуль сознательно не зависит от `portfolio.adapters` (кроме декодирования и
+отбора файлов — эти правила обязаны совпадать с `portfolio import-broker`):
 вспомогательные скрипты не должны ломаться при калибровке парсера, и наоборот.
 """
 
@@ -28,10 +29,12 @@ from portfolio.adapters.broker.tables import (  # noqa: E402
     decode_report,
     detect_encoding,
 )
+from portfolio.adapters.files import REPORT_SUFFIXES, discover_reports  # noqa: E402
 from portfolio.adapters.formats import normalize_text  # noqa: E402
 
 __all__ = [
     "HEADER_ALIASES",
+    "REPORT_SUFFIXES",
     "TABLE_ROW_MIN_CELLS",
     "TOTAL_MARKERS",
     "GridCell",
@@ -50,11 +53,6 @@ __all__ = [
 ]
 
 
-# Брокеры отдают HTML-выгрузку и под расширением .xls — это не бинарный Excel,
-# а та же таблица, поэтому расширение само по себе ничего не решает.
-REPORT_SUFFIXES = (".html", ".htm", ".xls")
-
-
 def iter_report_files(
     paths: list[Path],
     *,
@@ -68,45 +66,10 @@ def iter_report_files(
     найдено». Заметки печатает вызывающая сторона — молча проигнорированный
     аргумент хуже, чем лишняя строка в выводе.
     """
-    found: list[Path] = []
-    notes: list[str] = []
-
-    for entry in paths:
-        if entry.is_dir():
-            inside = _reports_inside(entry, recursive=recursive, pattern=pattern,
-                                     skip_suffixes=skip_suffixes)
-            if not inside:
-                notes.append(f"{entry}: отчётов не найдено")
-            found.extend(inside)
-            continue
-        if not entry.exists():
-            notes.append(f"{entry}: файла нет")
-            continue
-        found.append(entry)
-
-    return found, notes
-
-
-def _reports_inside(
-    directory: Path,
-    *,
-    recursive: bool,
-    pattern: str | None,
-    skip_suffixes: tuple[str, ...],
-) -> list[Path]:
-    mask = pattern or "*"
-    entries = directory.rglob(mask) if recursive else directory.glob(mask)
-
-    result: list[Path] = []
-    for path in sorted(entries):
-        if not path.is_file():
-            continue
-        if any(path.name.endswith(suffix) for suffix in skip_suffixes):
-            continue
-        if pattern is None and path.suffix.lower() not in REPORT_SUFFIXES:
-            continue
-        result.append(path)
-    return result
+    found = discover_reports(
+        paths, recursive=recursive, pattern=pattern, skip_suffixes=skip_suffixes
+    )
+    return list(found.files), list(found.notes)
 
 
 @dataclass
