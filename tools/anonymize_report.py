@@ -882,9 +882,63 @@ class Anonymizer:
     def _serialize(self, document: Any) -> bytes:
         from lxml import html as lxml_html
 
-        return lxml_html.tostring(
+        _declare_utf8(document)
+        data = lxml_html.tostring(
             document, encoding="utf-8", doctype="<!DOCTYPE html>", pretty_print=False
         )
+        return ensure_declaration(data)
+
+
+_HEAD_RE = re.compile(rb"<head[^>]*>", re.IGNORECASE)
+_HTML_RE = re.compile(rb"<html[^>]*>", re.IGNORECASE)
+_DECLARATION_RE = re.compile(rb"charset\s*=\s*[\"']?\s*utf-?8", re.IGNORECASE)
+_UTF8_META = b'<meta charset="utf-8">'
+
+
+def _declare_utf8(document: Any) -> None:
+    """Проставляет в документе объявление UTF-8 — в той форме, что переживает
+    сериализацию.
+
+    libxml2 при выводе с явной кодировкой **выбрасывает**
+    `<meta http-equiv="Content-Type">`, а HTML5-форму `<meta charset>`
+    оставляет. Отчёты, у которых объявление было только в старой форме,
+    теряли его совсем, и браузер, открывая такой файл локально, угадывал
+    кодировку по локали — для русской Windows это CP1251, то есть тот самый
+    «РЎРѕСЃС‚РѕСЏРЅРёРµ» на экране при технически исправных байтах.
+    """
+    head = next(iter(document.iter("head")), None)
+    if head is None:
+        root = next(iter(document.iter("html")), document)
+        head = root.makeelement("head", {})
+        root.insert(0, head)
+
+    for meta in list(head.iter("meta")):
+        if meta.get("charset") is not None:
+            meta.set("charset", "utf-8")
+            return
+        content = meta.get("content") or ""
+        if "charset" in content.lower():
+            meta.set("content", "text/html; charset=utf-8")
+
+    meta = head.makeelement("meta", {"charset": "utf-8"})
+    head.insert(0, meta)
+
+
+def ensure_declaration(data: bytes) -> bytes:
+    """Страховка после сериализации: в выводе обязано быть объявление UTF-8.
+
+    Фикстура без объявления кодировки технически корректна и нашим парсером
+    читается верно, но открывается мусором у всех остальных — в браузере, в
+    редакторе, у человека, который посмотрит её через год.
+    """
+    if _DECLARATION_RE.search(data[:4096]):
+        return data
+
+    for pattern in (_HEAD_RE, _HTML_RE):
+        match = pattern.search(data[:4096])
+        if match:
+            return data[: match.end()] + _UTF8_META + data[match.end() :]
+    return _UTF8_META + data
 
 
 def _looks_like_table_row(grid: ReportGrid, index: int) -> bool:

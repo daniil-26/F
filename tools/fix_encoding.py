@@ -62,6 +62,9 @@ GARBAGE_THRESHOLD = 0.15
 FIXED_SUFFIX = ".fixed.html"
 
 _META_CHARSET_RE = re.compile(r"""(charset=["']?\s*)([A-Za-z0-9_\-]+)""", re.IGNORECASE)
+_HEAD_RE = re.compile(r"<head[^>]*>", re.IGNORECASE)
+_HTML_RE = re.compile(r"<html[^>]*>", re.IGNORECASE)
+UTF8_META = '<meta charset="utf-8">' 
 
 
 @dataclass(frozen=True)
@@ -157,9 +160,18 @@ def _with_utf8_meta(text: str) -> str:
     """Приводит объявление кодировки к UTF-8: файл сохраняется именно в ней.
 
     Иначе починенный файл получит ту же болезнь: содержимое одно, объявление
-    другое, и следующий читатель снова прочитает его неверно.
+    другое, и следующий читатель снова прочитает его неверно. Если объявления
+    не было вовсе, оно добавляется: файл без объявления браузер читает по
+    локали — то есть тоже неверно.
     """
-    return _META_CHARSET_RE.sub(lambda match: match.group(1) + "utf-8", text)
+    if _META_CHARSET_RE.search(text):
+        return _META_CHARSET_RE.sub(lambda match: match.group(1) + "utf-8", text)
+
+    for pattern in (_HEAD_RE, _HTML_RE):
+        match = pattern.search(text[:4096])
+        if match:
+            return text[: match.end()] + UTF8_META + text[match.end() :]
+    return UTF8_META + text
 
 
 def build_parser() -> argparse.ArgumentParser:

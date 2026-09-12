@@ -91,6 +91,20 @@ def test_declaration_is_brought_in_line(tmp_path: Path) -> None:
     assert "windows-1251" not in report.text
 
 
+def test_declaration_is_added_when_missing(tmp_path: Path) -> None:
+    """Файл без объявления браузер читает по локали, то есть снова неверно."""
+    damaged = _broken(HEALTHY.replace(
+        '<meta http-equiv="Content-Type" content="text/html; charset=utf-8">', ""
+    ), "cp1251")
+    path = tmp_path / "report.html"
+    path.write_text(damaged, encoding="utf-8")
+
+    report = repair_file(path)
+
+    assert report.text is not None
+    assert 'charset="utf-8"' in report.text
+
+
 def test_cli_writes_fixed_copy(tmp_path: Path) -> None:
     path = tmp_path / "report.html"
     path.write_text(_broken(HEALTHY, "cp1251"), encoding="utf-8")

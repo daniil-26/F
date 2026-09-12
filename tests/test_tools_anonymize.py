@@ -12,6 +12,7 @@
 from __future__ import annotations
 
 import json
+import re
 import sys
 from collections import Counter
 from datetime import date
@@ -626,3 +627,47 @@ def _namespace(**values: object) -> Any:
     from argparse import Namespace
 
     return Namespace(**values)
+
+
+# --- объявление кодировки ---------------------------------------------------
+
+
+@pytest.mark.parametrize(
+    "declaration",
+    [
+        '<meta http-equiv="Content-Type" content="text/html; charset=windows-1251">',
+        '<meta charset="windows-1251">',
+        "",  # объявления нет вовсе
+    ],
+)
+def test_output_always_declares_utf8(tmp_path: Path, declaration: str) -> None:
+    """Результат обязан объявлять UTF-8 в форме, переживающей сериализацию.
+
+    libxml2 выбрасывает `<meta http-equiv="Content-Type">` и оставляет
+    `<meta charset>`. Отчёты, где объявление было только в старой форме,
+    теряли его совсем: байты корректные, а браузер открывал файл по локали —
+    для русской Windows как CP1251 — и показывал «РЎРѕСЃС‚РѕСЏРЅРёРµ».
+    """
+    report = f"""<html><head>{declaration}</head><body><table>
+     <tr><td>Дата</td><td>Тип операции</td><td>Сумма</td></tr>
+     <tr><td>05.08.2025</td><td>Вывод ДС</td><td>1 234.56</td></tr>
+    </table></body></html>"""
+    source = tmp_path / "report.html"
+    source.write_bytes(report.encode("cp1251" if declaration.count("1251") else "utf-8"))
+
+    target = tmp_path / "out.html"
+    assert main([str(source), "-o", str(target), "--mapping", str(tmp_path / "m.json"),
+                 "--seed", "7", "--quiet"]) == 0
+
+    data = target.read_bytes()
+    assert re.search(rb"charset\s*=\s*[\"']?utf-8", data[:4096], re.IGNORECASE)
+    assert "Тип операции" in data.decode("utf-8")
+
+
+def test_output_declaration_is_not_duplicated(tmp_path: Path) -> None:
+    target = tmp_path / "out.html"
+    main([str(RAW), "-o", str(target), "--mapping", str(tmp_path / "m.json"),
+          "--seed", "7", "--quiet"])
+
+    data = target.read_text("utf-8")
+    assert data.lower().count("charset") == 1
