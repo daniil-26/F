@@ -32,6 +32,7 @@ from portfolio.adapters.formats import normalize_text  # noqa: E402
 
 __all__ = [
     "HEADER_ALIASES",
+    "TABLE_ROW_MIN_CELLS",
     "TOTAL_MARKERS",
     "GridCell",
     "ReportGrid",
@@ -43,6 +44,7 @@ __all__ = [
     "is_total_marker",
     "iter_report_files",
     "load_grid",
+    "looks_like_table_row",
     "normalize_text",
     "parse_document",
 ]
@@ -287,6 +289,18 @@ def header_name(text: str) -> str | None:
             if variant in signature and (best is None or len(variant) > best[0]):
                 best = (len(variant), logical)
     return best[1] if best else None
+
+
+# Строка таблицы имеет хотя бы столько заполненных ячеек. Отсекает то, что стоит
+# в тех же колонках, но таблицей не является: подписи, подтверждение клиента,
+# дату формирования отчёта. Без этого «Руководитель компании | Петров П. П.»
+# попадает в словарь значений колонки, на которую пришёлся по сетке.
+TABLE_ROW_MIN_CELLS = 3
+
+
+def looks_like_table_row(grid: ReportGrid, index: int) -> bool:
+    values = [value for value in grid.row_text(index) if value]
+    return len(values) >= TABLE_ROW_MIN_CELLS
 
 
 def is_total_marker(text: str) -> bool:

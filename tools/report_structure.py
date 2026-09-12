@@ -19,11 +19,36 @@
     python tools/report_structure.py dump отчёт.html
     python tools/report_structure.py compare архив/*.html
     python tools/report_structure.py compare архив/*.html --json > inventory.json
+    python tools/report_structure.py digest архив/ -r -o digest.json
 
 В режиме `compare` строки помечаются:
 
     =   встречается во всех файлах
     +   встречается только в части файлов — с ними и будет больше всего работы
+
+Режим `digest` — единственный, который **безопасно отдавать наружу**: он
+выгружает форму архива без данных. Подробности в разделе «Выжимка» ниже.
+
+Выжимка (`digest`)
+------------------
+`dump` и `compare` печатают отчёт как есть, вместе с названиями бумаг и
+комментариями, то есть с вашими данными. Отдавать такой вывод нельзя.
+
+`digest` собирает то же знание о форме, но без значений:
+
+* имена файлов — с обнулёнными цифрами (в имени бывает номер счёта);
+* период — только год и месяц;
+* подписи секций, заголовки колонок, опознанные логические колонки;
+* словарь **брокера**: типы операций, виды сделок, площадки, валюты. Это
+  вокабуляр отчёта, а не ваши данные;
+* формы чисел и дат (`0 000.00`, `00.00.0000`) — по ним видно, сколько знаков
+  после точки бывает и какие разделители;
+* шаблоны комментариев, прогнанные через то же обезличивание, что и фикстуры:
+  «Погашение купона № БУМАГА-01» вместо настоящего названия;
+* количества строк по секциям.
+
+Чего в выжимке нет: названий бумаг, эмитентов, ISIN, номеров гос. регистрации,
+сумм, точных дат, ФИО, номеров счёта и договора.
 """
 
 from __future__ import annotations
@@ -41,13 +66,17 @@ from _report_grid import (
     ReportGrid,
     detect_encoding,
     has_total_marker,
+    header_name,
     is_date,
     is_number,
     is_time,
     is_total_marker,
+    iter_report_files,
     load_grid,
+    looks_like_table_row,
     normalize_text,
 )
+from anonymize_report import AliasStore, Anonymizer, Options
 
 # Колонки, значения которых образуют словарь предметных типов: именно их
 # полноту и проверяет шаг 0.
@@ -163,6 +192,8 @@ def _fill_section_values(grid: ReportGrid, sections: list[SectionInfo]) -> None:
             continue
         if has_total_marker(grid.row_text(cell.row)):
             continue
+        if not looks_like_table_row(grid, cell.row):
+            continue
         header = grid.header_of(cell)
         if header not in VALUE_COLUMNS:
             continue
@@ -191,6 +222,8 @@ def _values(grid: ReportGrid) -> dict[str, list[str]]:
         if grid.is_header_row(cell.row) or grid.is_section_row(cell.row):
             continue
         if has_total_marker(grid.row_text(cell.row)):
+            continue
+        if not looks_like_table_row(grid, cell.row):
             continue
         header = grid.header_of(cell)
         if header not in collected:
@@ -369,6 +402,160 @@ def _compare_block(title: str, per_file: dict[str, list[str]], names: list[str])
         print(f"  различий: {len(partial)} из {len(universe)} — именно они и требуют работы")
 
 
+# --- выжимка для передачи наружу -------------------------------------------
+
+# Колонки, значения которых в выжимку идут как есть: это вокабуляр брокера, а не
+# данные клиента.
+SAFE_VALUE_COLUMNS = ("operation_type", "trade_kind", "venue", "currency",
+                      "price_currency", "amount_currency", "fee_currency")
+
+_DIGIT_RE = re.compile(r"\d")
+# Три заглавных слова подряд — почти всегда ФИО. Вокабуляр брокера так не
+# выглядит: «Доход по финансовым инструментам», «Московская биржа (СПОТ: МБ T+)».
+_FULL_NAME_RE = re.compile(r"\b[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\s+[А-ЯЁ][а-яё]+\b")
+
+
+# Псевдонимы сводятся к заполнителям: в выжимке нужна форма комментария, а не
+# перечень бумаг. Иначе «Погашение купона № …» дробится на сотню строк по одной.
+_PLACEHOLDERS: tuple[tuple[re.Pattern[str], str], ...] = (
+    (re.compile(r"\b[A-Z]{2}000Z\d{6}\b"), "<isin>"),
+    (re.compile(r"\bБУМАГА-\d+"), "<бумага>"),
+    (re.compile(r"\bЭМИТЕНТ-\d+"), "<эмитент>"),
+    (re.compile(r"\bРЕГНОМЕР-\d+"), "<рег.номер>"),
+    (re.compile(r"\bКОД-\d+"), "<код>"),
+    (re.compile(r"\bДЕПОЗИТАРИЙ-\d+"), "<депозитарий>"),
+    (re.compile(r"\b(?:КЛИЕНТ|БРОКЕР|ЛИЦЕНЗИЯ-\d+|СОТРУДНИК-\d+|ФИО-\d+|КОНТАКТ-\d+)"), "<лицо>"),
+    (re.compile(r"\b(?:СЧЕТ|ДОГОВОР)-\d+"), "<реквизит>"),
+)
+
+
+def _template(text: str) -> str:
+    for pattern, placeholder in _PLACEHOLDERS:
+        text = pattern.sub(placeholder, text)
+    return text
+
+
+def _safe_values(values: list[str]) -> list[str]:
+    """Вторая линия обороны выжимки.
+
+    Первая — брать значения только из строк таблицы. Но выжимка уезжает наружу,
+    и одной проверки для этого мало: она структурная и молчит, если структура
+    окажется неожиданной.
+    """
+    return [value for value in values if not _FULL_NAME_RE.search(value)]
+
+
+def build_digest(paths: list[Path]) -> dict[str, object]:
+    """Форма архива без данных — то, что можно показать постороннему.
+
+    Комментарии прогоняются через то же обезличивание, что и фикстуры: в них
+    приезжают названия бумаг и иногда основания платежей с фамилиями.
+    """
+    files: list[dict[str, object]] = []
+    number_shapes: dict[str, int] = {}
+    date_shapes: dict[str, int] = {}
+    unknown_headers: dict[str, int] = {}
+    comments: dict[str, int] = {}
+
+    for path in paths:
+        grid = load_grid(path)
+        inventory = collect(path)
+        masker = Anonymizer(AliasStore.load(path.parent / "_digest_not_saved.json", seed=0),
+                            Options(dates="mask"))
+
+        for cell in grid.unique_cells():
+            text = cell.text
+            if not text:
+                continue
+            if is_number(text):
+                shape = _DIGIT_RE.sub("0", text)
+                number_shapes[shape] = number_shapes.get(shape, 0) + 1
+            elif is_date(text) or is_time(text):
+                shape = _DIGIT_RE.sub("0", text)
+                date_shapes[shape] = date_shapes.get(shape, 0) + 1
+            elif grid.header_of(cell) == "comment" and looks_like_table_row(grid, cell.row):
+                template = _template(masker.mask_text(text))[:160]
+                comments[template] = comments.get(template, 0) + 1
+
+        for index in sorted(grid.headers):
+            for cell in grid.rows[index]:
+                if cell is None or cell.row != index or not cell.text:
+                    continue
+                if header_name(cell.text) is None:
+                    unknown_headers[cell.text] = unknown_headers.get(cell.text, 0) + 1
+
+        files.append(
+            {
+                "file": _DIGIT_RE.sub("0", path.name),
+                "period": _coarse_period(inventory.period),
+                "encoding": inventory.encoding,
+                "declared_encoding": inventory.declared_encoding,
+                "rows": inventory.rows,
+                "grid_width": inventory.width,
+                "sections": [
+                    {
+                        "title": section.title,
+                        "rows": section.rows,
+                        "headers": section.headers,
+                        "logical": section.logical,
+                        "values": {
+                            name: _safe_values(values)
+                            for name, values in section.values.items()
+                            if name in SAFE_VALUE_COLUMNS
+                        },
+                    }
+                    for section in inventory.sections
+                ],
+            }
+        )
+
+    return {
+        "files": files,
+        "number_shapes": dict(sorted(number_shapes.items(), key=lambda item: -item[1])),
+        "date_shapes": dict(sorted(date_shapes.items(), key=lambda item: -item[1])),
+        "unknown_headers": dict(sorted(unknown_headers.items(), key=lambda item: -item[1])),
+        "comment_templates": dict(sorted(comments.items(), key=lambda item: -item[1])[:80]),
+    }
+
+
+def _coarse_period(period: str | None) -> str | None:
+    """Период огрубляется до месяцев: точные даты — тоже след владельца."""
+    if period is None:
+        return None
+    months = re.findall(r"\d{2}\.(\d{2})\.(\d{4})", period)
+    if not months:
+        return None
+    return " … ".join(f"{year}-{month}" for month, year in months)
+
+
+def print_digest_summary(digest: dict[str, object]) -> None:
+    files = digest["files"]
+    assert isinstance(files, list)
+    print(f"отчётов: {len(files)}")
+    for item in files:
+        assert isinstance(item, dict)
+        sections = item["sections"]
+        assert isinstance(sections, list)
+        print(f"  {item['file']}  {item['period']}  секций: {len(sections)}, строк: {item['rows']}")
+
+    for key, title in (
+        ("number_shapes", "формы чисел"),
+        ("date_shapes", "формы дат"),
+        ("unknown_headers", "неопознанные заголовки"),
+    ):
+        block = digest[key]
+        assert isinstance(block, dict)
+        print(f"\n{title}: {len(block)}")
+        for value, count in list(block.items())[:12]:
+            print(f"  ×{count:<6} {value}")
+
+    templates = digest["comment_templates"]
+    assert isinstance(templates, dict)
+    print(f"\nшаблоны комментариев: {len(templates)}")
+    for value, count in list(templates.items())[:12]:
+        print(f"  ×{count:<6} {value}")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -381,7 +568,38 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("files", nargs="+", type=Path)
     compare.add_argument("--json", action="store_true")
 
+    digest = subparsers.add_parser(
+        "digest",
+        help="форма архива без данных — единственный режим, который можно отдать наружу",
+    )
+    digest.add_argument("files", nargs="+", type=Path, metavar="ПУТЬ")
+    digest.add_argument("-r", "--recursive", action="store_true")
+    digest.add_argument("--pattern", metavar="МАСКА")
+    digest.add_argument("-o", "--out", type=Path, help="куда записать JSON")
+
     args = parser.parse_args(argv)
+
+    if args.command == "digest":
+        files, notes = iter_report_files(
+            args.files, recursive=args.recursive, pattern=args.pattern
+        )
+        for note in notes:
+            print(note, file=sys.stderr)
+        if not files:
+            print("не найдено ни одного отчёта", file=sys.stderr)
+            return 2
+
+        payload = build_digest(files)
+        text = json.dumps(payload, ensure_ascii=False, indent=2)
+        if args.out is not None:
+            args.out.write_text(text + "\n", encoding="utf-8")
+            print_digest_summary(payload)
+            print(f"\nВыжимка записана: {args.out}")
+            print("В ней нет названий бумаг, сумм, точных дат и реквизитов — её можно отдавать.")
+        else:
+            print(text)
+        return 0
+
     inventories = [collect(path) for path in args.files]
 
     if args.json:

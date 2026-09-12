@@ -90,6 +90,7 @@ from _report_grid import (
     is_number,
     is_time,
     iter_report_files,
+    looks_like_table_row,
     normalize_text,
     parse_document,
 )
@@ -176,9 +177,14 @@ MONEY_RE = re.compile(
     r"|(?<![\d.,:\-/])-?\d+\.\d{2,}(?![\d%])(?!\.\d)"
 )
 TRADE_NO_RE = re.compile(r"^[A-ZА-Я]{0,3}[-/]?\d[\d\-/]{3,}$", re.IGNORECASE)
-# «Иванов И. И.» в свободном тексте: брокер пишет так в основаниях платежей.
-# Заглавное слово плюс два инициала — почти всегда человек.
-PERSON_RE = re.compile(r"\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\.")
+# Человек в свободном тексте, в обоих порядках:
+#   «Иванов И. И.» — брокер пишет так в основаниях платежей;
+#   «им. В.Д. Шашина» — так в названиях эмитентов, и это тоже след владельца
+#   портфеля: по имени в названии бумага узнаётся однозначно.
+PERSON_RE = re.compile(
+    r"\b[А-ЯЁ][а-яё]{2,}\s+[А-ЯЁ]\.\s*[А-ЯЁ]\."
+    r"|\b[А-ЯЁ]\.\s?[А-ЯЁ]\.\s+[А-ЯЁ][а-яё]{2,}"
+)
 # Префиксы уже подставленных псевдонимов: по ним видно, что значение обезличено
 # и второй раз его переименовывать нельзя — иначе БУМАГА-02 превратится в БУМАГА-03.
 PSEUDONYM_PREFIXES = (
@@ -621,7 +627,7 @@ class Anonymizer:
         # Колоночные правила — только для настоящих строк таблицы. Строка из
         # двух ячеек под шапкой из шестнадцати колонок таблицей не является:
         # «На начало отчетного периода» иначе получает псевдоним из колонки ISIN.
-        header = grid.header_of(cell) if _looks_like_table_row(grid, cell.row) else None
+        header = grid.header_of(cell) if looks_like_table_row(grid, cell.row) else None
         if header == "storage":
             self._replace_whole(cell, self._identity_alias("storage", text))
             self.stats.note("storage")
@@ -939,11 +945,6 @@ def ensure_declaration(data: bytes) -> bytes:
         if match:
             return data[: match.end()] + _UTF8_META + data[match.end() :]
     return _UTF8_META + data
-
-
-def _looks_like_table_row(grid: ReportGrid, index: int) -> bool:
-    values = [value for value in grid.row_text(index) if value]
-    return len(values) >= SAMPLE_MIN_CELLS
 
 
 def _is_group_header(grid: ReportGrid, index: int, values: list[str]) -> bool:
