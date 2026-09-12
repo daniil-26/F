@@ -16,6 +16,7 @@ import sys
 from collections import Counter
 from datetime import date
 from pathlib import Path
+from typing import Any
 
 import pytest
 
@@ -27,6 +28,7 @@ from anonymize_report import (  # noqa: E402
     AliasStore,
     Anonymizer,
     Options,
+    collect_jobs,
     main,
     mask_number,
     verify_structure,
@@ -475,3 +477,152 @@ def test_sample_via_cli(tmp_path: Path) -> None:
     grid = build_grid(parse_document(target.read_bytes()))
     rows = _section_rows(grid, "2. Состояние портфеля")
     assert len([row for row in rows if row[0].startswith("БУМАГА")]) == 4
+
+
+# --- каталоги ---------------------------------------------------------------
+
+
+def _archive(tmp_path: Path) -> Path:
+    """Архив как он выглядит на диске: подкаталоги по годам и мусор рядом."""
+    root = tmp_path / "архив"
+    (root / "2024").mkdir(parents=True)
+    (root / "2025").mkdir()
+
+    (root / "2024" / "report_2024-01.html").write_bytes(RAW.read_bytes())
+    # Брокер отдаёт ту же HTML-выгрузку и под расширением .xls.
+    (root / "2024" / "report_2024-02.xls").write_bytes(RAW.read_bytes())
+    (root / "2025" / "report_2025-08.html").write_bytes(SAMPLING.read_bytes())
+    (root / "report_flat.html").write_bytes(RAW.read_bytes())
+
+    (root / "заметки.txt").write_text("не отчёт", encoding="utf-8")
+    (root / "notes.html").write_text(
+        "<html><body><p>без таблиц</p></body></html>", encoding="utf-8"
+    )
+    return root
+
+
+def test_directory_is_expanded_to_reports(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    out = tmp_path / "out"
+
+    code = main(
+        [str(root), "-r", "--out-dir", str(out), "--seed", "7", "--quiet"]
+    )
+
+    assert code == 0
+    produced = sorted(path.relative_to(out).as_posix() for path in out.rglob("*.anon.html"))
+    assert produced == [
+        "2024/report_2024-01.anon.html",
+        "2024/report_2024-02.anon.html",
+        "2025/report_2025-08.anon.html",
+        "report_flat.anon.html",
+    ]
+
+
+def test_recursive_keeps_subdirectories(tmp_path: Path) -> None:
+    """Архив разложен по годам; плоская выгрузка теряет разметку и рискует
+    совпадением имён."""
+    root = _archive(tmp_path)
+    out = tmp_path / "out"
+
+    main([str(root), "-r", "--out-dir", str(out), "--seed", "7", "--quiet"])
+
+    assert (out / "2024" / "report_2024-01.anon.html").exists()
+    assert (out / "2025" / "report_2025-08.anon.html").exists()
+
+
+def test_without_recursive_only_top_level(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    out = tmp_path / "out"
+
+    main([str(root), "--out-dir", str(out), "--seed", "7", "--quiet"])
+
+    assert sorted(path.name for path in out.rglob("*.anon.html")) == ["report_flat.anon.html"]
+
+
+def test_non_reports_are_skipped(tmp_path: Path) -> None:
+    """Каталог архива редко стерилен: pdf, скриншоты, случайные выгрузки.
+
+    Молча превратить такой файл в «обезличенный отчёт» хуже, чем пропустить.
+    """
+    root = _archive(tmp_path)
+    out = tmp_path / "out"
+
+    main([str(root), "-r", "--out-dir", str(out), "--seed", "7", "--quiet"])
+
+    names = {path.name for path in out.rglob("*")}
+    assert "заметки.anon.html" not in names
+    assert "notes.anon.html" not in names
+
+
+def test_previous_results_are_not_reprocessed(tmp_path: Path) -> None:
+    """Результат кладётся рядом с исходником — второй прогон не должен
+    обезличивать собственный вывод."""
+    root = _archive(tmp_path)
+
+    main([str(root), "-r", "--seed", "7", "--quiet"])
+    first = sorted(path.name for path in root.rglob("*.anon.html"))
+
+    jobs, _ = collect_jobs(
+        _namespace(files=[root], recursive=True, out_dir=None, out=None, pattern=None)
+    )
+
+    assert first
+    assert all(not job.source.name.endswith(".anon.html") for job in jobs)
+    # Четыре отчёта плюс notes.html: он с виду html и отсеивается уже при
+    # обработке — с сообщением, какой именно файл пропущен.
+    assert len(jobs) == 5
+
+
+def test_pattern_narrows_the_selection(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    out = tmp_path / "out"
+
+    main(
+        [
+            str(root), "-r", "--pattern", "report_2024*",
+            "--out-dir", str(out), "--seed", "7", "--quiet",
+        ]
+    )
+
+    assert sorted(path.name for path in out.rglob("*.anon.html")) == [
+        "report_2024-01.anon.html",
+        "report_2024-02.anon.html",
+    ]
+
+
+def test_aliases_are_shared_across_the_whole_run(tmp_path: Path) -> None:
+    """Одна бумага — один псевдоним во всех месяцах архива, иначе сквозной
+    импорт распадётся на несвязанные позиции."""
+    root = _archive(tmp_path)
+    out = tmp_path / "out"
+
+    main([str(root), "-r", "--out-dir", str(out), "--seed", "7", "--quiet"])
+
+    first = (out / "2024" / "report_2024-01.anon.html").read_bytes()
+    second = (out / "2024" / "report_2024-02.anon.html").read_bytes()
+    assert first == second  # одинаковые исходники дали одинаковый результат
+
+    mapping = json.loads((out / ".anonymize-mapping.json").read_text(encoding="utf-8"))
+    assert mapping["aliases"]["instrument"]
+
+
+def test_missing_path_is_reported(tmp_path: Path) -> None:
+    assert main([str(tmp_path / "нет-такого.html"), "--quiet"]) == 2
+
+
+def test_empty_directory_is_reported(tmp_path: Path) -> None:
+    empty = tmp_path / "пусто"
+    empty.mkdir()
+    assert main([str(empty), "--quiet"]) == 2
+
+
+def test_out_is_refused_for_many_files(tmp_path: Path) -> None:
+    root = _archive(tmp_path)
+    assert main([str(root), "-r", "-o", str(tmp_path / "one.html"), "--quiet"]) == 2
+
+
+def _namespace(**values: object) -> Any:
+    from argparse import Namespace
+
+    return Namespace(**values)

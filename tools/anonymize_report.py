@@ -52,7 +52,8 @@ Golden-тесты парсера требуют настоящих отчёто�
 Использование
 -------------
     python tools/anonymize_report.py отчёт.html -o tests/fixtures/report_01.html
-    python tools/anonymize_report.py отчёты/*.html --out-dir tests/fixtures/
+    python tools/anonymize_report.py архив/ --out-dir tests/fixtures/
+    python tools/anonymize_report.py архив/ -r --out-dir tests/fixtures/
     python tools/anonymize_report.py отчёт.html --dates mask --keep-instruments
     python tools/anonymize_report.py отчёт.html --dry-run   # только отчёт, без записи
 
@@ -1005,7 +1006,27 @@ def build_parser() -> argparse.ArgumentParser:
             "обезличивается эвристиками, и скрипт сам сообщает, где мог не сработать."
         ),
     )
-    parser.add_argument("files", nargs="+", type=Path, help="исходные HTML-отчёты")
+    parser.add_argument(
+        "files",
+        nargs="+",
+        type=Path,
+        metavar="ПУТЬ",
+        help="файлы отчётов или каталоги с ними",
+    )
+    parser.add_argument(
+        "-r",
+        "--recursive",
+        action="store_true",
+        help="заходить во вложенные каталоги; структура сохраняется в результате",
+    )
+    parser.add_argument(
+        "--pattern",
+        metavar="МАСКА",
+        help=(
+            "маска имён внутри каталога, например 'report_2024*.html'. "
+            f"По умолчанию берутся файлы с расширениями {', '.join(REPORT_SUFFIXES)}"
+        ),
+    )
     parser.add_argument("-o", "--out", type=Path, help="файл результата (для одного входа)")
     parser.add_argument("--out-dir", type=Path, help="каталог результата")
     parser.add_argument(
@@ -1060,25 +1081,133 @@ def build_parser() -> argparse.ArgumentParser:
     return parser
 
 
-def output_path(source: Path, args: argparse.Namespace) -> Path:
+# Брокеры отдают HTML-выгрузку и под расширением .xls — это не бинарный Excel,
+# а та же таблица, поэтому расширение само по себе ничего не решает.
+REPORT_SUFFIXES = (".html", ".htm", ".xls")
+ANON_SUFFIX = ".anon.html"
+
+
+@dataclass(frozen=True)
+class Job:
+    """Одна пара «исходный отчёт → куда записать результат»."""
+
+    source: Path
+    target: Path
+
+
+def collect_jobs(args: argparse.Namespace) -> tuple[list[Job], list[str]]:
+    """Разворачивает аргументы в список заданий.
+
+    Аргументом может быть файл или каталог. Для каталога берутся отчёты внутри
+    (с `--recursive` — и во вложенных, с сохранением структуры в результате):
+    архив за годы обычно разложен по подкаталогам, и складывать его в один
+    плоский каталог — терять эту разметку и напарываться на совпадающие имена.
+    """
+    jobs: list[Job] = []
+    notes: list[str] = []
+    seen_targets: dict[Path, Path] = {}
+
+    for entry in args.files:
+        if entry.is_dir():
+            found = _reports_in(entry, args, notes)
+            if not found:
+                notes.append(f"{entry}: отчётов не найдено")
+            for source in found:
+                jobs.append(Job(source=source, target=_target_for(source, entry, args)))
+            continue
+
+        if not entry.exists():
+            notes.append(f"{entry}: файла нет")
+            continue
+
+        jobs.append(Job(source=entry, target=_target_for(entry, entry.parent, args)))
+
+    if args.out is not None:
+        # С --out все задания метят в один файл. Схлопывать их в одно нельзя:
+        # тогда каталог из десяти отчётов молча превратился бы в один файл.
+        return jobs, notes
+
+    unique: list[Job] = []
+    for job in jobs:
+        clash = seen_targets.get(job.target)
+        if clash is not None:
+            notes.append(
+                f"{job.source}: результат совпал бы с {clash} — пропущен, "
+                "разведите каталоги или используйте --recursive"
+            )
+            continue
+        seen_targets[job.target] = job.source
+        unique.append(job)
+    return unique, notes
+
+
+def _reports_in(directory: Path, args: argparse.Namespace, notes: list[str]) -> list[Path]:
+    pattern = args.pattern or "*"
+    entries = directory.rglob(pattern) if args.recursive else directory.glob(pattern)
+
+    found: list[Path] = []
+    for path in sorted(entries):
+        if not path.is_file():
+            continue
+        if path.name.endswith(ANON_SUFFIX):
+            # Результат предыдущего прогона: обезличивать его повторно
+            # бессмысленно, а в каталоге он лежит рядом с исходниками.
+            continue
+        if args.pattern is None and path.suffix.lower() not in REPORT_SUFFIXES:
+            continue
+        found.append(path)
+
+    _ = notes
+    return found
+
+
+def _target_for(source: Path, root: Path, args: argparse.Namespace) -> Path:
     if args.out is not None:
         return args.out
+
+    name = source.name
+    for suffix in REPORT_SUFFIXES:
+        if name.lower().endswith(suffix):
+            name = name[: -len(suffix)]
+            break
+    name += ANON_SUFFIX
+
+    if args.out_dir is None:
+        return source.with_name(name)
+
+    try:
+        relative = source.parent.relative_to(root)
+    except ValueError:
+        relative = Path()
+    return args.out_dir / relative / name
+
+
+def _mapping_dir(args: argparse.Namespace) -> Path:
     if args.out_dir is not None:
-        return args.out_dir / f"{source.stem}.anon.html"
-    return source.with_suffix(".anon.html")
+        return args.out_dir
+    if args.out is not None:
+        return args.out.parent
+    first = args.files[0]
+    return first if first.is_dir() else first.parent
 
 
 def main(argv: list[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    if args.out is not None and len(args.files) > 1:
+
+    jobs, notes = collect_jobs(args)
+    for note in notes:
+        print(note, file=sys.stderr)
+    if not jobs:
+        print("не найдено ни одного отчёта для обработки", file=sys.stderr)
+        return 2
+    if args.out is not None and len(jobs) > 1:
         print(
             "--out годится для одного файла; для нескольких используйте --out-dir",
             file=sys.stderr,
         )
         return 2
 
-    first_output = output_path(args.files[0], args)
-    mapping_path = args.mapping or first_output.parent / ".anonymize-mapping.json"
+    mapping_path = args.mapping or _mapping_dir(args) / ".anonymize-mapping.json"
     store = AliasStore.load(mapping_path, seed=args.seed)
 
     if args.sample is not None and not 0 < args.sample <= 1:
@@ -1103,40 +1232,66 @@ def main(argv: list[str] | None = None) -> int:
     )
 
     failures = 0
-    for source in args.files:
-        target = output_path(source, args)
+    processed = 0
+    skipped = 0
+
+    for job in jobs:
+        content = job.source.read_bytes()
+        if not _looks_like_report(content):
+            print(f"{job.source}: не похоже на отчёт (нет таблиц) — пропущен", file=sys.stderr)
+            skipped += 1
+            continue
+
         anonymizer = Anonymizer(store, options)
         try:
-            result = anonymizer.run(source.read_bytes())
+            result = anonymizer.run(content)
         except Exception as error:
-            print(f"{source}: не обработан — {error}", file=sys.stderr)
+            print(f"{job.source}: не обработан — {error}", file=sys.stderr)
             failures += 1
             continue
 
         problem = verify_structure(
-            source.read_bytes(), result, dropped_rows=anonymizer.stats.dropped_rows
+            content, result, dropped_rows=anonymizer.stats.dropped_rows
         )
         if problem is not None:
-            print(f"{source}: структура изменилась — {problem}", file=sys.stderr)
+            print(f"{job.source}: структура изменилась — {problem}", file=sys.stderr)
             failures += 1
             continue
 
         if not args.dry_run:
-            target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_bytes(result)
+            job.target.parent.mkdir(parents=True, exist_ok=True)
+            job.target.write_bytes(result)
 
+        processed += 1
         if not args.quiet:
-            _print_report(source, target, anonymizer.stats, dry_run=args.dry_run)
+            _print_report(job.source, job.target, anonymizer.stats, dry_run=args.dry_run)
 
     if not args.dry_run:
         store.save()
-        if not args.quiet:
+
+    if not args.quiet:
+        if len(jobs) > 1 or skipped or failures:
             print(
-                f"\nФайл соответствий: {mapping_path} — "
+                f"\nИтого: обработано {processed}, пропущено {skipped}, "
+                f"с ошибкой {failures} из {len(jobs)}"
+            )
+        if not args.dry_run:
+            print(
+                f"Файл соответствий: {mapping_path} — "
                 "не коммитить, это ключ к исходным данным."
             )
 
     return 1 if failures else 0
+
+
+def _looks_like_report(content: bytes) -> bool:
+    """Дешёвая проверка до разбора: в отчёте есть таблицы.
+
+    Каталог архива редко бывает стерильным — в нём лежат pdf, скриншоты и
+    случайные выгрузки. Молча превратить такой файл в «обезличенный отчёт»
+    хуже, чем пропустить его с явным сообщением.
+    """
+    return b"<table" in content.lower()[:2_000_000]
 
 
 def verify_structure(before: bytes, after: bytes, *, dropped_rows: int = 0) -> str | None:
