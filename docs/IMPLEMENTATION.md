@@ -864,7 +864,7 @@ run_check(settings=None) -> CheckResult
 
 ## 10. Тесты
 
-178 тестов, без сети и без поднятого PostgreSQL. Тестовая БД — SQLite во
+246 тестов (из них 178 по этапу 1 и вспомогательным скриптам), без сети и без поднятого PostgreSQL. Тестовая БД — SQLite во
 временном каталоге, схема создаётся из тех же метаданных.
 
 | Файл | Что проверяет |
@@ -893,7 +893,7 @@ run_check(settings=None) -> CheckResult
 Команды проверки:
 
 ```bash
-pytest                              # 178 тестов
+pytest                              # 246 тестов
 ruff check .
 mypy --strict src/portfolio/calc
 mypy                                # весь пакет

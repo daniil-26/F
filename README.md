@@ -141,7 +141,7 @@ python -m bondlab verify --board TQOB       # свой расчёт против
 ## Разработка
 
 ```bash
-pytest                                   # 244 теста, без сети и без БД
+pytest                                   # 246 тестов, без сети и без БД
 ruff check .
 mypy --strict src/portfolio/calc
 mypy                                     # весь пакет
