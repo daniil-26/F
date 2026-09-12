@@ -11,10 +11,12 @@ from __future__ import annotations
 import sys
 from pathlib import Path
 
+import pytest
+
 TOOLS = Path(__file__).resolve().parents[1] / "tools"
 sys.path.insert(0, str(TOOLS))
 
-from _report_grid import load_grid  # noqa: E402
+from _report_grid import header_name, load_grid  # noqa: E402
 from report_structure import collect, main  # noqa: E402
 
 RAW = Path(__file__).parent / "fixtures" / "tools" / "broker_raw_sample.html"
@@ -91,3 +93,98 @@ def test_cli_compare_needs_two_files(capsys) -> None:  # type: ignore[no-untyped
     assert main(["compare", str(RAW), str(SYNTHETIC)]) == 0
     out = capsys.readouterr().out
     assert "различий" in out
+
+
+# --- находки на архиве из 14 отчётов ----------------------------------------
+
+
+def test_three_level_section_numbering() -> None:
+    """В отчётах с 2019 года появился третий уровень: «8.1.1 Зачислено/списано
+    ДС по неторговым операциям». Без него подразделы 8.1.1 и 8.2 сливаются в
+    один список, и прореживание считает их одной таблицей.
+    """
+    report = """<html><body><table>
+     <tr><td colspan="3">8. Неторговые операции</td></tr>
+     <tr><td colspan="3">8.1.1 Зачислено/списано ДС по неторговым операциям</td></tr>
+     <tr><td>Дата</td><td>Тип операции</td><td>Сумма</td><td>Валюта</td></tr>
+     <tr><td>05.08.2025</td><td>Погашение купона</td><td>1 234.56</td><td>RUR</td></tr>
+     <tr><td colspan="3">8.2 Неторговые операции с ЦБ</td></tr>
+     <tr><td>Дата</td><td>Тип операции</td><td>Наименование ЦБ</td><td>ISIN</td>
+         <td>Количество ЦБ</td></tr>
+     <tr><td>07.08.2025</td><td>Конвертация ЦБ</td><td>Бумага</td><td>RU000A105X64</td>
+         <td>10</td></tr>
+    </table></body></html>"""
+    path = Path(__file__).parent / "fixtures" / "tools" / "_three_level.html"
+    path.write_bytes(report.encode("utf-8"))
+    try:
+        inventory = collect(path)
+        titles = [section.title for section in inventory.sections]
+    finally:
+        path.unlink()
+
+    assert "8.1.1 Зачислено/списано ДС по неторговым операциям" in titles
+    assert "8.2 Неторговые операции с ЦБ" in titles
+
+
+def test_price_and_amount_currency_are_separate_columns() -> None:
+    """Еврооблигация котируется в USD, а рассчитывается в рублях.
+
+    Одна колонка «валюта» на обе означала бы, что сделка в долларах спишет
+    доллары, — а списывает она рубли.
+    """
+    assert header_name("Валюта цены") == "price_currency"
+    assert header_name("Валюта суммы сделки") == "amount_currency"
+    assert header_name("Валюта брокерской комиссии") == "fee_currency"
+    assert header_name("Валюта") == "currency"
+
+
+@pytest.mark.parametrize(
+    ("header", "expected"),
+    [
+        ("НКД", "accrued_int"),
+        ("Брокерская комиссия", "fee_broker"),
+        ("Комиссия ТС", "fee_exchange"),
+        ("Гербовый сбор", "fee_stamp"),
+        ("Зачислено ЦБ, шт.", "quantity_in"),
+        ("Списано ЦБ, шт.", "quantity_out"),
+        ("Доля ЦБ в портфеле, %", "share"),
+        ("% по сделке", "rate"),
+        ("Тип незавершенной сделки", "trade_kind"),
+        ("Тип сделки РЕПО", "trade_kind"),
+    ],
+)
+def test_columns_found_in_the_archive_are_recognized(header: str, expected: str) -> None:
+    """Колонки, которых не было в первом разобранном отчёте: комиссии трёх
+    видов, НКД, движения количества, ставка по сделке."""
+    assert header_name(header) == expected
+
+
+def test_operation_vocabulary_is_split_by_section() -> None:
+    """«Погашение облигации» встречается и в денежной секции, и в бумажной.
+
+    Это два разных события журнала: выплата и списание бумаги. Общий список без
+    разбивки по секциям их путает.
+    """
+    report = """<html><body><table>
+     <tr><td colspan="3">8.1.1 Зачислено/списано ДС по неторговым операциям</td></tr>
+     <tr><td>Дата</td><td>Тип операции</td><td>Сумма</td><td>Валюта</td></tr>
+     <tr><td>05.08.2025</td><td>Погашение облигации</td><td>1 000.00</td><td>RUR</td></tr>
+     <tr><td colspan="3">8.2 Неторговые операции с ЦБ</td></tr>
+     <tr><td>Дата</td><td>Тип операции</td><td>Наименование ЦБ</td><td>ISIN</td>
+         <td>Количество ЦБ</td></tr>
+     <tr><td>05.08.2025</td><td>Погашение облигации</td><td>Бумага</td>
+         <td>RU000A105X64</td><td>10</td></tr>
+    </table></body></html>"""
+    path = Path(__file__).parent / "fixtures" / "tools" / "_two_sides.html"
+    path.write_bytes(report.encode("utf-8"))
+    try:
+        inventory = collect(path)
+        by_title = {section.title: section for section in inventory.sections}
+    finally:
+        path.unlink()
+
+    money = by_title["8.1.1 Зачислено/списано ДС по неторговым операциям"]
+    securities = by_title["8.2 Неторговые операции с ЦБ"]
+
+    assert money.values["operation_type"] == ["Погашение облигации"]
+    assert securities.values["operation_type"] == ["Погашение облигации"]

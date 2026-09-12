@@ -62,6 +62,10 @@ class SectionInfo:
     rows: int = 0
     headers: list[list[str]] = field(default_factory=list)
     logical: list[str] = field(default_factory=list)
+    # Словари значений внутри именно этой секции. Без разбивки по секциям
+    # «Погашение облигации» в деньгах (8.1.1) и в бумагах (8.2) неразличимы,
+    # а это два разных события журнала.
+    values: dict[str, list[str]] = field(default_factory=dict)
 
 
 @dataclass
@@ -95,6 +99,7 @@ class Inventory:
                     "rows": section.rows,
                     "headers": section.headers,
                     "logical": section.logical,
+                    "values": section.values,
                 }
                 for section in self.sections
             ],
@@ -106,6 +111,7 @@ def collect(path: Path) -> Inventory:
     grid = load_grid(path)
     sections = _sections(grid)
     values = _values(grid)
+    _fill_section_values(grid, sections)
 
     choice = detect_encoding(path.read_bytes())
     return Inventory(
@@ -147,6 +153,34 @@ def _sections(grid: ReportGrid) -> list[SectionInfo]:
             section.rows += 1
 
     return [found[title] for title in order]
+
+
+def _fill_section_values(grid: ReportGrid, sections: list[SectionInfo]) -> None:
+    by_title = {section.title: section for section in sections}
+
+    for cell in grid.unique_cells():
+        if grid.is_header_row(cell.row) or grid.is_section_row(cell.row):
+            continue
+        if has_total_marker(grid.row_text(cell.row)):
+            continue
+        header = grid.header_of(cell)
+        if header not in VALUE_COLUMNS:
+            continue
+        section = by_title.get(grid.sections.get(cell.row) or "(без секции)")
+        if section is None:
+            continue
+        text = normalize_text(cell.text)
+        if not text or is_number(text) or is_date(text) or is_time(text):
+            continue
+        if is_total_marker(text):
+            continue
+        bucket = section.values.setdefault(header, [])
+        if text not in bucket:
+            bucket.append(text)
+
+    for section in sections:
+        for values in section.values.values():
+            values.sort()
 
 
 def _values(grid: ReportGrid) -> dict[str, list[str]]:
@@ -241,6 +275,8 @@ def print_dump(inventory: Inventory) -> None:
             print(f"      шапка: {' | '.join(header)}")
         if section.logical:
             print(f"      опознанные колонки: {', '.join(section.logical)}")
+        for name, values in sorted(section.values.items()):
+            print(f"      {name}: {', '.join(values)}")
 
     for name, values in inventory.values.items():
         print(f"\n{name} ({len(values)}):")
@@ -283,6 +319,20 @@ def print_compare(inventories: list[Inventory]) -> None:
         }
         if any(values.values()):
             _compare_block(name, values, names)
+
+    _compare_block(
+        "тип операции по секциям",
+        {
+            item.path.name: [
+                f"{section.title} :: {value}"
+                for section in item.sections
+                for column in ("operation_type", "trade_kind")
+                for value in section.values.get(column, [])
+            ]
+            for item in inventories
+        },
+        names,
+    )
 
     _compare_block(
         "шапки секций",

@@ -1231,6 +1231,13 @@ def main(argv: list[str] | None = None) -> int:
         print(note, file=sys.stderr)
     if not jobs:
         print("не найдено ни одного отчёта для обработки", file=sys.stderr)
+        if _has_anonymized_files(args):
+            print(
+                f"В каталоге есть файлы {ANON_SUFFIX} — они пропускаются как "
+                "результат предыдущего прогона. Чтобы обработать их повторно, "
+                "передайте их именами файлов, а не каталогом.",
+                file=sys.stderr,
+            )
         return 2
     if args.out is not None and len(jobs) > 1:
         print(
@@ -1317,6 +1324,21 @@ def main(argv: list[str] | None = None) -> int:
             )
 
     return 1 if failures else 0
+
+
+def _has_anonymized_files(args: argparse.Namespace) -> bool:
+    """Каталог не пуст, но целиком состоит из результатов прошлого прогона.
+
+    Без этой подсказки «не найдено ни одного отчёта» на непустом каталоге
+    выглядит как поломка скрипта.
+    """
+    for entry in args.files:
+        if not entry.is_dir():
+            continue
+        found = entry.rglob("*") if args.recursive else entry.glob("*")
+        if any(path.name.endswith(ANON_SUFFIX) for path in found):
+            return True
+    return False
 
 
 def _encoding_warnings(source: Path, content: bytes) -> list[str]:
