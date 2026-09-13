@@ -3,7 +3,8 @@
 Личный self-hosted инструмент учёта и анализа портфеля (российский рынок).
 Описание функционала — [`docs/portfolio-spec.md`](docs/portfolio-spec.md),
 техническое описание реализованного — [`docs/IMPLEMENTATION.md`](docs/IMPLEMENTATION.md),
-разбор формата отчёта брокера — [`docs/BROKER-REPORT-FORMAT.md`](docs/BROKER-REPORT-FORMAT.md).
+разбор формата отчёта брокера — [`docs/BROKER-REPORT-FORMAT.md`](docs/BROKER-REPORT-FORMAT.md),
+краткая памятка для работы над проектом — [`CLAUDE.md`](CLAUDE.md).
 
 **Текущий этап — первый:** журнал операций, импорт отчётов брокера, сверка
 остатков, инварианты, golden-тесты парсера. Рабочий план этапа —
