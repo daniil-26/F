@@ -21,6 +21,7 @@ from portfolio.jobs.import_broker import (
 )
 from portfolio.jobs.import_csv import CsvImportResult, import_csv_file
 from portfolio.jobs.inbox import collect_inbox
+from portfolio.jobs.init_db import init_db
 
 app = typer.Typer(
     help="Учёт инвестиций: журнал, импорт отчётов брокера, сверка.",
@@ -31,6 +32,28 @@ console = Console()
 
 EXIT_DISCREPANCY = 1
 EXIT_INPUT_ERROR = 2
+
+
+@app.command("init-db")
+def init_db_command() -> None:
+    """Создать схему журнала в локальной БД SQLite.
+
+    Боевая схема приезжает миграциями: `alembic upgrade head` на PostgreSQL.
+    Эта команда нужна, чтобы прогнать архив локально, не поднимая сервер.
+    """
+    try:
+        result = init_db()
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(EXIT_INPUT_ERROR) from error
+
+    console.print(f"База: {result.url}")
+    if result.created:
+        console.print(f"[green]Созданы таблицы: {', '.join(result.created)}.[/green]")
+    if result.existing:
+        console.print(f"Уже были: {', '.join(result.existing)}.")
+    if not result.created:
+        console.print("Схема уже на месте — ничего не менялось.")
 
 
 @app.command("import-broker")

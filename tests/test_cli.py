@@ -5,10 +5,12 @@ from __future__ import annotations
 from pathlib import Path
 
 import pytest
+from sqlalchemy import inspect
 from typer.testing import CliRunner
 
-from conftest import FIXTURES
+from conftest import FIXTURES, _clear_caches
 from portfolio.cli import EXIT_DISCREPANCY, EXIT_INPUT_ERROR, app
+from portfolio.db import get_engine
 
 runner = CliRunner()
 
@@ -101,3 +103,59 @@ def test_broken_csv_returns_input_error(database: Path, tmp_path: Path) -> None:
 
     assert result.exit_code == EXIT_INPUT_ERROR
     assert "поле quantity" in result.stdout
+
+
+def test_init_db_creates_schema_for_local_sqlite(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Локальный прогон архива не должен требовать поднятой PostgreSQL."""
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'local.db'}")
+    monkeypatch.setenv("DATA_RAW_DIR", str(tmp_path / "raw"))
+    _clear_caches()
+
+    try:
+        result = runner.invoke(app, ["init-db"])
+
+        assert result.exit_code == 0
+        assert "transactions" in result.stdout
+        assert set(inspect(get_engine()).get_table_names()) >= {
+            "accounts",
+            "instruments",
+            "raw_reports",
+            "transactions",
+        }
+    finally:
+        get_engine().dispose()
+        _clear_caches()
+
+
+def test_init_db_is_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setenv("DATABASE_URL", f"sqlite:///{tmp_path / 'local.db'}")
+    monkeypatch.setenv("DATA_RAW_DIR", str(tmp_path / "raw"))
+    _clear_caches()
+
+    try:
+        runner.invoke(app, ["init-db"])
+        result = runner.invoke(app, ["init-db"])
+
+        assert result.exit_code == 0
+        assert "ничего не менялось" in result.stdout
+    finally:
+        get_engine().dispose()
+        _clear_caches()
+
+
+def test_init_db_refuses_postgresql_and_points_to_alembic(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Боевая схема приезжает миграцией: иначе история изменений разъедется."""
+    monkeypatch.setenv("DATABASE_URL", "postgresql+psycopg://portfolio@localhost:5432/portfolio")
+    _clear_caches()
+
+    try:
+        result = runner.invoke(app, ["init-db"])
+
+        assert result.exit_code == EXIT_INPUT_ERROR
+        assert "alembic upgrade head" in result.stdout
+    finally:
+        _clear_caches()
