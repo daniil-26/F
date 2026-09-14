@@ -256,3 +256,55 @@ def test_trade_repeated_in_section_5_10_is_written_once(database: Path, tmp_path
 
     assert result.committed
     assert result.diff.summary() == {"new": 11, "unchanged": 3, "reversals": 0}
+
+
+# -- подзаголовок группы сделок ----------------------------------------------
+
+_SUBHEADER_REPORT = """<html><body><table>
+<tr><td>Номер счета клиента</td><td>СЧЕТ-77</td></tr>
+<tr><td>за период с 01.03.2024 по 31.03.2024</td></tr>
+<tr><td>2. Состояние портфеля ценных бумаг</td></tr>
+<tr><td>Наименование ЦБ</td><td>Эмитент</td><td>Номер гос. регистрации</td><td>ISIN</td>
+    <td>Количество ЦБ на начало периода, шт.</td><td>Количество ЦБ на конец периода, шт.</td></tr>
+<tr><td>Облигация 1Р-01</td><td>ЭМИТЕНТ-01</td><td>4B02-01-00001-A</td><td>RU000A1038V6</td>
+    <td>0</td><td>9</td></tr>
+<tr><td>5.1 Биржевые сделки с ценными бумагами</td></tr>
+<tr><td>Номер сделки</td><td>Дата сделки</td><td>Вид сделки</td><td>Цена одной ЦБ</td>
+    <td>Количество ЦБ, шт.</td><td>Сумма сделки</td><td>Валюта суммы сделки</td>
+    <td>Дата оплаты</td></tr>
+<tr><td>MC0123456789  Облигация 1Р-01  4B02-01-00001-A  RUR</td></tr>
+<tr><td>B-000001-000001</td><td>05.03.2024</td><td>Покупка</td><td>1000.00</td>
+    <td>9</td><td>9000.00</td><td>RUR</td><td>05.03.2024</td></tr>
+</table></body></html>"""
+
+
+def test_issue_code_in_subheader_is_not_mistaken_for_isin() -> None:
+    """Первым в подзаголовке стоит внутренний код выпуска формы ISIN.
+
+    «MC» плюс десять цифр проходит проверку формы ISIN, но ISIN-ом этой бумаги
+    не является. Взятый за него, он заводит бумагу в справочнике второй раз:
+    сделки уходят на неё, контрольный остаток — на запись из раздела 2, и
+    сверка показывает ноль против количества по обеим строкам сразу.
+    """
+    report = parse(_SUBHEADER_REPORT.encode("utf-8"))
+
+    (trade,) = _of_kind(report, "BUY")
+    (balance,) = [item for item in report.balances if item.kind == "security"]
+
+    assert trade.isin == "RU000A1038V6", "ISIN берётся из раздела 2, а не из подзаголовка"
+    assert trade.ticker == balance.ticker
+    assert trade.isin == balance.isin
+    assert not report.unparsed
+
+
+def test_unknown_isin_shaped_token_still_identifies_the_paper() -> None:
+    """Бумаги нет в разделе 2 — тогда токен формы ISIN лучше, чем ничего:
+    по нему строку хотя бы видно во «Входящих»."""
+    report = parse(
+        _SUBHEADER_REPORT.replace("Облигация 1Р-01  4B02-01-00001-A  RUR", "RUR").encode("utf-8")
+    )
+
+    (trade,) = _of_kind(report, "BUY")
+
+    assert trade.isin == "MC0123456789"
+    assert trade.ticker is None

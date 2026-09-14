@@ -663,9 +663,20 @@ def _instrument_of(text: str, instruments: _Instruments) -> tuple[str | None, st
         found = instruments.find_in(match.group(1))
         if found is not None:
             return found
-        return None, match.group(1)
+
+    # Токен формы ISIN, которого нет в разделе 2, — ещё не ISIN этой бумаги.
+    # В подзаголовке группы сделок первым стоит внутренний код выпуска той же
+    # формы («MC» плюс десять цифр), и раньше разбор брал его и останавливался:
+    # бумага заводилась в справочнике второй раз, сделки уходили на неё, а
+    # контрольный остаток — на запись из раздела 2. Раздел 2 авторитетнее
+    # (A-23), поэтому спрашиваем его по всему подзаголовку.
     found = instruments.find_in(text)
-    return found if found is not None else (None, None)
+    if found is not None:
+        return found
+
+    # Ничего не known: токен формы ISIN всё же лучше, чем ничего — по нему
+    # бумагу хотя бы видно в «Входящих».
+    return (None, match.group(1)) if match else (None, None)
 
 
 def _is_summary_row(row: dict[str, str]) -> bool:
