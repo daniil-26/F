@@ -89,15 +89,41 @@ from portfolio.adapters.broker.tables import extract_tables as _extract_tables_v
 from portfolio.adapters.formats import FormatError, is_blank, parse_decimal
 from portfolio.domain.events import KeyInput, assign_natural_keys
 
-# Подписи раздела 1 → вид комиссии в журнале. Сравнение по видам и есть смысл
-# сводки: «комиссия брокера» брокера обязана сойтись с нашими FEE·BROKER.
-_FEE_LABELS: tuple[tuple[str, str], ...] = (
+# Подписи раздела 1 → категория журнала. Раздел раскладывает остаток теми же
+# категориями, что и журнал, но независимо от нашего разбора: сальдо торговых и
+# неторговых операций, комиссии по видам. Поэтому сравнение по строкам этой
+# таблицы локализует расхождение до категории, а не до отчёта целиком.
+#
+# Две подписи могут вести в одну категорию (депозитарий брокера и иные
+# депозитарии), поэтому значения отчёта по категории складываются.
+_CATEGORY_LABELS: tuple[tuple[str, str], ...] = (
+    ("сальдо торговых операций", "TRADE"),
+    ("сальдо неторговых операций", "NONTRADE"),
     ("комиссия брокера", "FEE·BROKER"),
     ("комиссия торговой системы", "FEE·EXCHANGE"),
     ("гербовый сбор", "FEE·STAMP"),
     ("комиссия депозитария брокера", "FEE·DEPOSITARY"),
     ("комиссия иных депозитариев", "FEE·DEPOSITARY"),
 )
+
+# Строка «Уплаченная комиссия и сборы» — итог по видам, а не ещё один вид.
+# Складывать её с составляющими нельзя: комиссии посчитались бы дважды.
+_FEE_TOTAL_LABELS = ("уплаченная комиссия и сборы в том числе", "уплаченная комиссия и сборы")
+
+# Порядок строк сверки: подпись, категория, уровень вложенности.
+_CATEGORY_ROWS: tuple[tuple[str, str, int], ...] = (
+    ("сальдо торговых операций", "TRADE", 0),
+    ("сальдо неторговых операций", "NONTRADE", 0),
+    ("уплаченная комиссия и сборы", "FEE", 0),
+    ("комиссия брокера", "FEE·BROKER", 1),
+    ("комиссия торговой системы", "FEE·EXCHANGE", 1),
+    ("гербовый сбор", "FEE·STAMP", 1),
+    ("депозитарные комиссии", "FEE·DEPOSITARY", 1),
+)
+
+# Строки раздела 1, которые не сравниваются: это не категории движения, а
+# остатки и их разложение. Остатки печатаются отдельными строками сверки.
+_NOT_A_CATEGORY = ("остаток", "свободные средства")
 
 # Строка «Входящий остаток (всего):» несёт не сумму, а код валюты колонки
 # (A-25), само число стоит ниже. Поэтому итог ищется по нескольким подписям в
@@ -600,26 +626,36 @@ def print_parse(path: Path) -> None:
     устроен отчёт, а тем, во что превратились его строки.
     """
     report: ParsedReport = parse_with_mapping(path.read_bytes())
+    # Итоги считаются по тем же операциям, что двигают остаток: повтор сделки
+    # из 5.1 в 5.10 (A-22) журнал схлопывает ключом, и сумма «как напечатано»
+    # завышена ровно на него. Список ниже показывает все строки, помечая
+    # схлопнутые, — потерянную строку иначе не отличить от схлопнутой.
+    settled = _settled_operations(report)
+    counted = {id(item) for item in settled}
 
     print(f"=== {path}")
     print(f"версия парсера: {report.mapping_version}")
     print(f"период: {report.period_start} — {report.period_end}")
     print(f"счёт: {report.account_code}")
 
-    print(f"\nоперации: {len(report.operations)}")
+    repeats = len(report.operations) - len(settled)
+    print(f"\nоперации: {len(report.operations)}, из них схлопнуто повторов: {repeats}")
     header = f"  {'дата':<12}{'тип':<16}{'бумага':<24}{'количество':>14}{'сумма':>16}  влт"
     print(header)
     for operation in sorted(report.operations, key=lambda item: (item.trade_date, item.kind)):
         name = (operation.ticker or operation.isin or "—")[:23]
         quantity = "—" if operation.quantity is None else f"{operation.quantity:>14}"
+        mark = "  " if id(operation) in counted else " ·"
         print(
-            f"  {operation.trade_date!s:<12}{_operation_label(operation):<16}{name:<24}"
+            f"{mark}{operation.trade_date!s:<12}{_operation_label(operation):<16}{name:<24}"
             f"{quantity:>14}{operation.amount:>16}  {operation.currency}"
         )
+    if repeats:
+        print("  · — строка уже учтена: та же сделка пришла и в 5.1, и в 5.10 (A-22)")
 
-    _print_totals(report)
+    _print_totals(settled)
     _print_cash_summary(path, report)
-    _print_hints(report)
+    _print_hints(settled)
 
     print("\nконтрольные остатки из отчёта")
     for balance in report.balances:
@@ -633,11 +669,11 @@ def print_parse(path: Path) -> None:
         print(f"    {row.row}")
 
 
-def _print_totals(report: ParsedReport) -> None:
+def _print_totals(operations: list[ParsedOperation]) -> None:
     """Итоги по типам: первое, что нужно при расхождении денег."""
     money: dict[tuple[str, str], Decimal] = {}
     counts: dict[tuple[str, str], int] = {}
-    for operation in report.operations:
+    for operation in operations:
         key = (_operation_label(operation), operation.currency)
         money[key] = money.get(key, Decimal(0)) + operation.amount
         counts[key] = counts.get(key, 0) + 1
@@ -732,8 +768,10 @@ def _print_cash_summary(path: Path, report: ParsedReport) -> None:
     closing = _find_total(rows, _CLOSING_LABELS)
     movement = sum((item.amount for item in _settled_operations(report)), Decimal(0))
 
+    _print_category_comparison(rows, report, opening, closing, movement)
+
     print("\nсходимость денег")
-    print(f"  {'входящий остаток (всего)':<44}{_or_dash(opening):>16}")
+    print(f"  {'входящий остаток (всего)':<44}{_cell(opening):>16}")
     print(f"  {'движение по журналу':<44}{movement:>16}")
     if opening is not None and closing is not None:
         print(f"  {'получается на конец':<44}{opening + movement:>16}")
@@ -742,7 +780,6 @@ def _print_cash_summary(path: Path, report: ParsedReport) -> None:
     else:
         print("  входящий или исходящий остаток не найден — сверить нечем")
 
-    _print_fee_comparison(rows, report)
     _print_subkopeck(report)
 
 
@@ -814,50 +851,119 @@ def _print_subkopeck(report: ParsedReport) -> None:
     print("  итог журнала отличается от брокерского на доли копейки по каждой такой строке")
 
 
-def _print_fee_comparison(
-    rows: list[tuple[int, str, list[Decimal]]], report: ParsedReport
-) -> None:
-    """Комиссии по видам: строка брокера против наших событий FEE."""
-    ours: dict[str, Decimal] = {}
-    for item in report.operations:
-        if item.kind != "FEE":
-            continue
-        key = _operation_label(item)
-        ours[key] = ours.get(key, Decimal(0)) + item.amount
+def _ours_by_category(operations: list[ParsedOperation]) -> dict[str, Decimal]:
+    """Движение журнала теми же категориями, какими его печатает раздел 1.
 
-    matched: list[tuple[str, Decimal, Decimal]] = []
+    Сделки берутся без комиссий: комиссия — отдельное событие (A-06), и войдя
+    в «сальдо торговых операций», она посчиталась бы дважды.
+    """
+    totals: dict[str, Decimal] = {}
+
+    def add(key: str, value: Decimal) -> None:
+        totals[key] = totals.get(key, Decimal(0)) + value
+
+    for item in operations:
+        if item.kind == "FEE":
+            add("FEE", item.amount)
+            add(_operation_label(item), item.amount)
+        elif item.kind in ("BUY", "SELL"):
+            add("TRADE", item.amount)
+        else:
+            add("NONTRADE", item.amount)
+    return totals
+
+
+def _reported_by_category(
+    rows: list[tuple[int, str, list[Decimal]]],
+) -> tuple[dict[str, Decimal], list[tuple[str, Decimal]]]:
+    """Числа раздела 1 по категориям плюс строки, которым пары не нашлось."""
+    reported: dict[str, Decimal] = {}
+    orphans: list[tuple[str, Decimal]] = []
+
     for _, label, numbers in rows:
+        if not numbers:
+            continue
         signature = normalize_signature(label)
-        for marker, fee_kind in _FEE_LABELS:
-            if signature == marker and numbers:
-                matched.append((label, numbers[-1], ours.get(fee_kind, Decimal(0))))
+        if signature in _FEE_TOTAL_LABELS:
+            reported["FEE"] = reported.get("FEE", Decimal(0)) + numbers[-1]
+            continue
+        matched = next(
+            (key for marker, key in _CATEGORY_LABELS if signature == marker), None
+        )
+        if matched is not None:
+            reported[matched] = reported.get(matched, Decimal(0)) + numbers[-1]
+            continue
+        if not any(marker in signature for marker in _NOT_A_CATEGORY):
+            orphans.append((label, numbers[-1]))
+    return reported, orphans
 
-    if not matched:
-        return
 
-    print(f"\nкомиссии по видам\n  {'строка отчёта':<36}{'в отчёте':>16}{'в журнале':>16}"
-          f"{'разница':>14}")
-    for label, reported, mine in matched:
-        print(f"  {label:<36}{reported:>16}{mine:>16}{mine - reported:>14}")
+def _print_category_comparison(
+    rows: list[tuple[int, str, list[Decimal]]],
+    report: ParsedReport,
+    opening: Decimal | None,
+    closing: Decimal | None,
+    movement: Decimal,
+) -> None:
+    """Расчётное против отчётного по каждой категории — строка к строке."""
+    ours = _ours_by_category(_settled_operations(report))
+    reported, orphans = _reported_by_category(rows)
+
+    print(
+        f"\nсверка по категориям\n  {'параметр':<38}{'в отчёте':>15}"
+        f"{'в журнале':>15}{'разница':>13}"
+    )
+    print(f"  {'входящий остаток (всего)':<38}{_cell(opening):>15}{'—':>15}{'—':>13}")
+
+    for label, key, indent in _CATEGORY_ROWS:
+        mine = ours.get(key)
+        theirs = reported.get(key)
+        if mine is None and theirs is None:
+            continue
+        title = " " * (2 * indent) + label
+        print(f"  {title:<38}{_cell(theirs):>15}{_cell(mine):>15}{_gap(theirs, mine):>13}")
+
+    computed = None if opening is None else opening + movement
+    print(
+        f"  {'исходящий остаток (всего)':<38}{_cell(closing):>15}"
+        f"{_cell(computed):>15}{_gap(closing, computed):>13}"
+    )
+
+    missing = sorted(set(ours) - set(reported) - {"FEE"})
+    if missing:
+        print("\n  журнал насчитал, а раздел 1 отдельной строкой не показывает:")
+        for key in missing:
+            print(f"    {key:<36}{'':>15}{ours[key]:>15}")
+
+    if orphans:
+        print("\n  строки раздела 1 без пары в журнале (сравнить глазами):")
+        for label, value in orphans:
+            print(f"    {label:<36}{value:>15}")
 
 
-def _or_dash(value: Decimal | None) -> str:
+def _cell(value: Decimal | None) -> str:
     return "—" if value is None else str(value)
 
 
-def _print_hints(report: ParsedReport) -> None:
+def _gap(reported: Decimal | None, mine: Decimal | None) -> str:
+    """Разница считается только когда есть обе стороны: ноль вместо прочерка
+    здесь означал бы «сошлось», а сошлось нечему."""
+    if reported is None or mine is None:
+        return "—"
+    return str(mine - reported)
+
+
+def _print_hints(operations: list[ParsedOperation]) -> None:
     """Суммы, с которыми стоит сравнить расхождение сверки.
 
     Каждая из трёх отвечает за одно незакрытое допущение: совпадение
     расхождения с такой суммой — не совпадение, а ответ.
     """
     accrued = sum(
-        (abs(item.accrued_int) for item in report.operations if item.accrued_int), Decimal(0)
+        (abs(item.accrued_int) for item in operations if item.accrued_int), Decimal(0)
     )
-    tax = sum(
-        (item.amount for item in report.operations if item.kind == "TAX"), Decimal(0)
-    )
-    fees = sum((item.amount for item in report.operations if item.kind == "FEE"), Decimal(0))
+    tax = sum((item.amount for item in operations if item.kind == "TAX"), Decimal(0))
+    fees = sum((item.amount for item in operations if item.kind == "FEE"), Decimal(0))
 
     print("\nс чем сравнить расхождение денег")
     print(f"  сумма НКД по сделкам      {accrued:>16}   A-07: входит ли НКД в «Сумму сделки»")

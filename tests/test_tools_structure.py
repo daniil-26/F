@@ -232,8 +232,10 @@ def test_parse_reconciles_cash_against_section_one(
     assert "РАСХОЖДЕНИЕ" in out
     line = next(item for item in out.splitlines() if "РАСХОЖДЕНИЕ" in item)
     assert line.split()[-1] == "0.00"
-    # Комиссии сверяются по видам против строк раздела 1.
-    assert "комиссия Брокера" in out and "комиссия торговой системы" in out
+    # Комиссии сверяются по видам против строк раздела 1 — и сходятся.
+    assert "сверка по категориям" in out
+    fees = next(item for item in out.splitlines() if "уплаченная комиссия и сборы" in item)
+    assert fees.split()[-3:] == ["-11.00", "-11.00", "0.00"]
 
 
 def test_cash_summary_counts_a_repeated_trade_once(
@@ -251,3 +253,30 @@ def test_cash_summary_counts_a_repeated_trade_once(
 
     movement = next(item for item in out.splitlines() if "движение по журналу" in item)
     assert movement.split()[-1] == "3919.00"
+
+
+def test_totals_do_not_double_count_a_repeated_trade(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Итоги по типам считают ту же сделку один раз.
+
+    Сделка печатается и в 5.1, и в 5.10 (A-22); журнал схлопывает повтор
+    ключом идемпотентности. Итог «как напечатано» завышен ровно на повтор — и
+    сравнивать его с разделом 1 бессмысленно, а выглядит он правдоподобно.
+    """
+    v2 = Path(__file__).parent / "fixtures" / "report_v2_2024-03.html"
+
+    main(["parse", str(v2)])
+    out = capsys.readouterr().out
+
+    assert "схлопнуто повторов: 3" in out
+
+    # Искать надо в блоке итогов: в списке операций та же подпись стоит у
+    # каждой отдельной строки комиссии.
+    lines = out.splitlines()
+    totals = lines[lines.index("итоги по типам операций") :]
+    broker = next(item for item in totals if "FEE·BROKER" in item)
+    assert broker.split()[-2:] == ["-10.00", "RUB"]
+
+    hint = next(item for item in lines if "сумма комиссий" in item)
+    assert "-11.00" in hint
