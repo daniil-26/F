@@ -303,10 +303,21 @@ def _security_balances(
         isin = _isin(_value(row, columns, "isin"))
         instruments.add(name=name, regnum=_value(row, columns, "regnum"), isin=isin)
 
-        closing = _value(row, columns, "closing_balance")
+        # Контрольное число — «Плановое количество ЦБ», а не «Количество ЦБ на
+        # конец периода» (A-26). Второе показывает бумаги, уже поставленные на
+        # счёт депо: сделка последнего дня периода с поставкой в следующем
+        # стоит в отчёте как «к зачислению», в фактическом количестве её ещё
+        # нет, а в журнале уже есть — позиции считаются по дате сделки (A-03).
+        # Деньгам зеркально: там берётся фактический остаток, а не плановый
+        # (A-25), потому что деньги считаются по дате оплаты.
+        closing = _value(row, columns, "planned_quantity") or _value(
+            row, columns, "closing_balance"
+        )
         if closing is None:
             yield UnparsedRow(
-                table=section.title, row=row, reason="нет количества на конец периода"
+                table=section.title,
+                row=row,
+                reason="нет ни планового количества, ни количества на конец периода",
             )
             continue
         if name is None and isin is None:

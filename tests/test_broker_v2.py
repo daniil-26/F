@@ -384,3 +384,48 @@ def test_zero_reward_does_not_become_an_event() -> None:
     report = parse(_LOAN_REPORT.replace("<td>0.25</td>", "<td>0.00</td>").encode("utf-8"))
 
     assert _of_kind(report, "LENDING_INCOME") == []
+
+
+_PENDING_DELIVERY_REPORT = """<html><body><table>
+<tr><td>Номер счета клиента</td><td>СЧЕТ-77</td></tr>
+<tr><td>за период с 01.03.2024 по 31.03.2024</td></tr>
+<tr><td>2. Состояние портфеля ценных бумаг</td></tr>
+<tr><td>Наименование ЦБ</td><td>ISIN</td><td>Количество ЦБ на начало периода, шт.</td>
+    <td>Количество ЦБ на конец периода, шт.</td><td>ЦБ к зачислению, шт.</td>
+    <td>ЦБ к выводу, шт.</td><td>Плановое количество ЦБ, шт.</td></tr>
+<tr><td>Сбер ао</td><td>RU0009029540</td><td>0.00</td>
+    <td>0.00</td><td>5.00</td><td>0.00</td><td>5.00</td></tr>
+<tr><td>ОФЗ 26238</td><td>RU000A1038V6</td><td>5.00</td>
+    <td>5.00</td><td>0.00</td><td>0.00</td><td>5.00</td></tr>
+</table></body></html>"""
+
+
+def test_control_quantity_is_the_planned_one() -> None:
+    """Сделка последнего дня периода с поставкой в следующем (A-26).
+
+    В отчёте она стоит как «ЦБ к зачислению»: на счёт депо бумаги ещё не
+    поставлены, поэтому «Количество ЦБ на конец периода» их не показывает. В
+    журнале они уже есть — позиции считаются по дате сделки (A-03). Контрольным
+    числом поэтому служит плановое количество.
+    """
+    report = parse(_PENDING_DELIVERY_REPORT.encode("utf-8"))
+    by_name = {item.ticker: item.quantity for item in report.balances if item.kind == "security"}
+
+    assert by_name["Сбер ао"] == Decimal("5.00"), "бумага в пути — не ноль"
+    assert by_name["ОФЗ 26238"] == Decimal("5.00")
+    assert report.unparsed == ()
+
+
+def test_control_quantity_falls_back_to_the_closing_one() -> None:
+    """Колонки планового количества может не быть — тогда фактическое."""
+    report = parse(
+        _PENDING_DELIVERY_REPORT.replace("<td>Плановое количество ЦБ, шт.</td>", "")
+        .replace("<td>0.00</td><td>5.00</td><td>0.00</td><td>5.00</td>",
+                 "<td>0.00</td><td>5.00</td><td>0.00</td>")
+        .replace("<td>5.00</td><td>0.00</td><td>0.00</td><td>5.00</td>",
+                 "<td>5.00</td><td>0.00</td><td>0.00</td>")
+        .encode("utf-8")
+    )
+    by_name = {item.ticker: item.quantity for item in report.balances if item.kind == "security"}
+
+    assert by_name["Сбер ао"] == Decimal("0.00")
