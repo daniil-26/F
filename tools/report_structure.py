@@ -17,6 +17,7 @@
 Использование
 -------------
     python tools/report_structure.py dump отчёт.html
+    python tools/report_structure.py parse отчёт.html
     python tools/report_structure.py compare архив/*.html
     python tools/report_structure.py compare архив/*.html --json > inventory.json
     python tools/report_structure.py digest архив/ -r -o digest.json
@@ -58,6 +59,7 @@ import json
 import re
 import sys
 from dataclasses import dataclass, field
+from decimal import Decimal
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent))
@@ -77,6 +79,9 @@ from _report_grid import (
     normalize_text,
 )
 from anonymize_report import AliasStore, Anonymizer, Options
+
+from portfolio.adapters.broker.dto import ParsedOperation, ParsedReport
+from portfolio.adapters.broker.mapping import parse as parse_with_mapping
 
 # Колонки, значения которых образуют словарь предметных типов: именно их
 # полноту и проверяет шаг 0.
@@ -556,6 +561,95 @@ def print_digest_summary(digest: dict[str, object]) -> None:
         print(f"  ×{count:<6} {value}")
 
 
+def _operation_label(operation: ParsedOperation) -> str:
+    """Комиссии различаются видом: одной строкой `FEE` расхождение не разобрать."""
+    if operation.kind == "FEE" and operation.fee_kind:
+        return f"FEE·{operation.fee_kind}"
+    return operation.kind
+
+
+def print_parse(path: Path) -> None:
+    """Что парсер вычитал из отчёта: события, итоги по типам, контрольные остатки.
+
+    `dump` показывает форму документа, а это — результат разбора. При
+    расхождении сверки нужно именно второе: расхождение объясняется не тем, как
+    устроен отчёт, а тем, во что превратились его строки.
+    """
+    report: ParsedReport = parse_with_mapping(path.read_bytes())
+
+    print(f"=== {path}")
+    print(f"версия парсера: {report.mapping_version}")
+    print(f"период: {report.period_start} — {report.period_end}")
+    print(f"счёт: {report.account_code}")
+
+    print(f"\nоперации: {len(report.operations)}")
+    header = f"  {'дата':<12}{'тип':<16}{'бумага':<24}{'количество':>14}{'сумма':>16}  влт"
+    print(header)
+    for operation in sorted(report.operations, key=lambda item: (item.trade_date, item.kind)):
+        name = (operation.ticker or operation.isin or "—")[:23]
+        quantity = "—" if operation.quantity is None else f"{operation.quantity:>14}"
+        print(
+            f"  {operation.trade_date!s:<12}{_operation_label(operation):<16}{name:<24}"
+            f"{quantity:>14}{operation.amount:>16}  {operation.currency}"
+        )
+
+    _print_totals(report)
+    _print_hints(report)
+
+    print("\nконтрольные остатки из отчёта")
+    for balance in report.balances:
+        label = balance.ticker or balance.isin or balance.currency
+        suffix = f" ({balance.isin})" if balance.isin and balance.ticker else ""
+        print(f"  {balance.kind:<10}{label + suffix:<32}{balance.quantity:>16}")
+
+    print(f"\nнераспознанные строки: {len(report.unparsed)}")
+    for row in report.unparsed:
+        print(f"  • [{row.table}] {row.reason}")
+        print(f"    {row.row}")
+
+
+def _print_totals(report: ParsedReport) -> None:
+    """Итоги по типам: первое, что нужно при расхождении денег."""
+    money: dict[tuple[str, str], Decimal] = {}
+    counts: dict[tuple[str, str], int] = {}
+    for operation in report.operations:
+        key = (_operation_label(operation), operation.currency)
+        money[key] = money.get(key, Decimal(0)) + operation.amount
+        counts[key] = counts.get(key, 0) + 1
+
+    print(f"\nитоги по типам операций\n  {'тип':<16}{'событий':>9}{'сумма денег':>18}  влт")
+    for (label, currency), total in sorted(money.items()):
+        print(f"  {label:<16}{counts[(label, currency)]:>9}{total:>18}  {currency}")
+
+    totals: dict[str, Decimal] = {}
+    for (_, currency), total in money.items():
+        totals[currency] = totals.get(currency, Decimal(0)) + total
+    for currency, total in sorted(totals.items()):
+        print(f"  {'движение денег за период':<25}{total:>18}  {currency}")
+
+
+def _print_hints(report: ParsedReport) -> None:
+    """Суммы, с которыми стоит сравнить расхождение сверки.
+
+    Каждая из трёх отвечает за одно незакрытое допущение: совпадение
+    расхождения с такой суммой — не совпадение, а ответ.
+    """
+    accrued = sum(
+        (abs(item.accrued_int) for item in report.operations if item.accrued_int), Decimal(0)
+    )
+    tax = sum(
+        (item.amount for item in report.operations if item.kind == "TAX"), Decimal(0)
+    )
+    fees = sum((item.amount for item in report.operations if item.kind == "FEE"), Decimal(0))
+
+    print("\nс чем сравнить расхождение денег")
+    print(f"  сумма НКД по сделкам      {accrued:>16}   A-07: входит ли НКД в «Сумму сделки»")
+    print(f"  сумма налога              {tax:>16}   A-04: купон брутто или нетто")
+    print(f"  сумма комиссий            {fees:>16}   A-06: все ли виды учтены")
+    print("  разделы займа (5.4, 5.9) пропускаются целиком — A-24;")
+    print("  сколько в них строк, покажет `dump` этого же отчёта")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__.split("\n")[0])
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -568,6 +662,11 @@ def main(argv: list[str] | None = None) -> int:
     compare.add_argument("files", nargs="+", type=Path)
     compare.add_argument("--json", action="store_true")
 
+    parse_cmd = subparsers.add_parser(
+        "parse", help="что парсер вычитал из отчёта: события, итоги, остатки"
+    )
+    parse_cmd.add_argument("files", nargs="+", type=Path)
+
     digest = subparsers.add_parser(
         "digest",
         help="форма архива без данных — единственный режим, который можно отдать наружу",
@@ -578,6 +677,11 @@ def main(argv: list[str] | None = None) -> int:
     digest.add_argument("-o", "--out", type=Path, help="куда записать JSON")
 
     args = parser.parse_args(argv)
+
+    if args.command == "parse":
+        for path in args.files:
+            print_parse(path)
+        return 0
 
     if args.command == "digest":
         files, notes = iter_report_files(

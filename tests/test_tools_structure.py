@@ -188,3 +188,26 @@ def test_operation_vocabulary_is_split_by_section() -> None:
 
     assert money.values["operation_type"] == ["Погашение облигации"]
     assert securities.values["operation_type"] == ["Погашение облигации"]
+
+
+def test_parse_shows_what_the_parser_made_of_the_report(capsys: pytest.CaptureFixture[str]) -> None:
+    """`dump` показывает форму документа, `parse` — результат разбора.
+
+    При расхождении сверки нужно второе: расхождение объясняется не тем, как
+    устроен отчёт, а тем, во что превратились его строки.
+    """
+    v2 = Path(__file__).parent / "fixtures" / "report_v2_2024-03.html"
+
+    assert main(["parse", str(v2)]) == 0
+    out = capsys.readouterr().out
+
+    assert "версия парсера: v2" in out
+    # Итоги по типам — то, с чем сравнивается расхождение денег.
+    assert "итоги по типам операций" in out
+    assert "движение денег за период" in out
+    # Комиссии различаются видом: одной строкой `FEE` расхождение не разобрать.
+    assert "FEE·BROKER" in out
+    assert "FEE·EXCHANGE" in out
+    # Три подсказки отвечают за три незакрытых допущения.
+    assert "A-07" in out and "A-04" in out and "A-06" in out
+    assert "нераспознанные строки: 0" in out
