@@ -225,7 +225,11 @@ def main(argv: list[str] | None = None) -> int:
                 if not backup.exists():
                     backup.write_bytes(path.read_bytes())
             target.parent.mkdir(parents=True, exist_ok=True)
-            target.write_text(report.text, encoding="utf-8")
+            # Байтами, а не `write_text`: отчёты приходят с CRLF, а текстовый
+            # режим на Windows транслирует каждый \n в \r\n и превращает их в
+            # \r\r\n. Файл распухает пустыми строками, и обещание «починка
+            # возвращает текст символ в символ» перестаёт выполняться.
+            target.write_bytes(report.text.encode("utf-8"))
 
         if report.repaired:
             repaired += 1

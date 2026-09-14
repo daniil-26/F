@@ -155,3 +155,22 @@ def test_cli_reports_hopeless_with_nonzero_code(tmp_path: Path) -> None:
     path.write_text(original.encode("utf-8").decode("cp1251", errors="replace"), encoding="utf-8")
 
     assert main([str(path), "--quiet"]) == 1
+
+
+def test_line_endings_survive_byte_for_byte(tmp_path: Path) -> None:
+    """Отчёты брокера приходят с CRLF (`docs/BROKER-REPORT-FORMAT.md`).
+
+    Запись через `write_text` на Windows транслирует каждый `\\n` в `\\r\\n` и
+    превращает CRLF исходника в `\\r\\r\\n`: файл распухает пустыми строками, а
+    обещание «починка точна» перестаёт выполняться. На Linux трансляции нет,
+    поэтому проверка сторожит контракт там, где он ломается, — сравнением
+    байтов, а не строк.
+    """
+    healthy = HEALTHY.replace("\n", "\r\n")
+    path = tmp_path / "report.html"
+    path.write_bytes(_broken(healthy, "cp1251").encode("utf-8"))
+
+    assert main([str(path), "--quiet"]) == 0
+
+    fixed = tmp_path / "report.fixed.html"
+    assert fixed.read_bytes() == healthy.encode("utf-8")
