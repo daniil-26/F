@@ -60,12 +60,18 @@ def reconcile(
     as_of: date | None = None,
     cash_tolerance: Decimal = Decimal("0.01"),
     quantity_tolerance: Decimal = Decimal(0),
+    labels: Mapping[int, str] | None = None,
 ) -> ReconcileResult:
     """Сравнивает журнал с контрольными числами отчёта.
 
     Деньги сверяются по `settlement_date`, бумаги — по `trade_date`
     (STAGE-1, T7). Позиция, которой нет в отчёте, но есть в журнале, — тоже
     расхождение: потерянная продажа выглядит именно так.
+
+    `labels` — подписи инструментов для таких позиций. Справочник живёт в БД, а
+    `domain/` к ней не ходит, поэтому подписи приходят параметром из `jobs/`.
+    Без них строка расхождения называлась бы голым номером записи, то есть не
+    называлась бы никак.
     """
     rows = list(transactions)
     actual_cash = cash_balances(rows, as_of)
@@ -116,7 +122,9 @@ def reconcile(
             raise ValueError(f"неизвестный вид остатка: {item.kind!r}")
 
     discrepancies.extend(
-        _missing_in_report(actual_cash, seen_currencies, actual_positions, seen_instruments)
+        _missing_in_report(
+            actual_cash, seen_currencies, actual_positions, seen_instruments, labels or {}
+        )
     )
 
     return ReconcileResult(
@@ -126,11 +134,17 @@ def reconcile(
     )
 
 
+def _position_label(instrument_id: int, labels: Mapping[int, str]) -> str:
+    known = labels.get(instrument_id)
+    return f"{known} (#{instrument_id})" if known else f"#{instrument_id}"
+
+
 def _missing_in_report(
     actual_cash: Mapping[str, Decimal],
     seen_currencies: set[str],
     actual_positions: Mapping[int, Position],
     seen_instruments: set[int],
+    labels: Mapping[int, str],
 ) -> list[Discrepancy]:
     """Позиции и валюты, которых нет среди контрольных чисел отчёта.
 
@@ -150,7 +164,10 @@ def _missing_in_report(
             result.append(
                 Discrepancy(
                     kind="security",
-                    label=str(instrument_id),
+                    # Номер записи справочника остаётся в метке: когда одна
+                    # бумага завелась дважды, различить две строки можно только
+                    # по нему — названия у них одинаковые.
+                    label=_position_label(instrument_id, labels),
                     expected=Decimal(0),
                     actual=position.quantity,
                 )

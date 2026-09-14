@@ -223,6 +223,7 @@ def import_broker_report(
             as_of=report.period_end,
             cash_tolerance=config.reconcile_cash_tolerance,
             quantity_tolerance=config.reconcile_quantity_tolerance,
+            labels=_instrument_labels(session),
         )
 
         # ── граница --dry-run ──
@@ -351,6 +352,14 @@ def _instrument_ref(operation: ParsedOperation, instrument: Instrument | None) -
     if instrument is not None:
         return instrument.isin or instrument.ticker
     return operation.isin or operation.ticker
+
+
+def _instrument_labels(session: Session) -> dict[int, str]:
+    """Подписи справочника для расхождений: `domain/` в БД не ходит."""
+    return {
+        instrument.id: instrument.ticker or instrument.isin or instrument.name or ""
+        for instrument in session.scalars(select(Instrument))
+    }
 
 
 def _to_expected(

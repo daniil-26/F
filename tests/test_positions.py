@@ -153,7 +153,23 @@ def test_position_absent_from_report_is_a_discrepancy() -> None:
         [ExpectedBalance(kind="cash", quantity=Decimal("-100"), currency="RUB", label="RUB")],
     )
 
-    assert [item.label for item in result.discrepancies] == ["1"]
+    # Без справочника подписей остаётся номер записи: `domain/` в БД не ходит.
+    assert [item.label for item in result.discrepancies] == ["#1"]
+
+
+def test_position_absent_from_report_is_named_when_labels_are_given() -> None:
+    """Голый номер записи не называет бумагу никак, а именно эту строку и
+    приходится разбирать. Номер при этом остаётся: когда одна бумага завелась
+    в справочнике дважды, различить две строки можно только по нему."""
+    rows = [_row(1, EventType.BUY, trade_date=date(2025, 8, 2), quantity="10", amount="-100")]
+
+    result = reconcile(
+        rows,
+        [ExpectedBalance(kind="cash", quantity=Decimal("-100"), currency="RUB", label="RUB")],
+        labels={1: "SBER"},
+    )
+
+    assert [item.label for item in result.discrepancies] == ["SBER (#1)"]
 
 
 def test_cash_tolerance_is_a_kopeck() -> None:
@@ -173,3 +189,28 @@ def test_cash_tolerance_is_a_kopeck() -> None:
         cash_tolerance=Decimal("0.01"),
     )
     assert result.ok
+
+
+def test_transfer_moves_the_position() -> None:
+    """«Ввод ЦБ» и «Вывод ЦБ» из раздела 8.2 меняют количество, а не деньги.
+
+    Перевод бумаг извне — единственный источник позиции, у которого нет
+    денежного эффекта. Пропущенный проекцией, он даёт расхождение, выглядящее
+    как потерянная операция: строка в журнале есть, в количестве её нет.
+    """
+    rows = [
+        _row(1, EventType.TRANSFER, trade_date=date(2024, 3, 5), quantity="4"),
+        _row(2, EventType.TRANSFER, trade_date=date(2024, 3, 20), quantity="-1"),
+    ]
+
+    positions = positions_on(rows, date(2024, 3, 31))
+
+    assert positions[1].quantity == Decimal(3)
+
+
+def test_cash_transfer_without_instrument_is_not_a_position() -> None:
+    """Тот же тип без бумаги позицией не становится: строка без инструмента
+    пропускается, а не заводит позицию с пустым ключом."""
+    rows = [_row(1, EventType.TRANSFER, trade_date=date(2024, 3, 5), instrument_id=None)]
+
+    assert positions_on(rows, date(2024, 3, 31)) == {}

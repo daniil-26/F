@@ -26,7 +26,7 @@ from portfolio.domain.instruments import InstrumentResolver
 from portfolio.domain.invariants import Violation, check_all
 from portfolio.domain.ledger import load_entries
 from portfolio.domain.reconcile import ExpectedBalance, ReconcileResult, reconcile
-from portfolio.models import Account, RawReport, Transaction
+from portfolio.models import Account, Instrument, RawReport, Transaction
 
 __all__ = ["CheckResult", "ReportCheck", "run_check"]
 
@@ -115,6 +115,7 @@ def _check_report(session: Session, report: RawReport) -> ReportCheck:
         as_of=parsed.period_end,
         cash_tolerance=get_settings().reconcile_cash_tolerance,
         quantity_tolerance=get_settings().reconcile_quantity_tolerance,
+        labels=_instrument_labels(session),
     )
 
     return ReportCheck(
@@ -125,6 +126,14 @@ def _check_report(session: Session, report: RawReport) -> ReportCheck:
         result=result,
         unparsed=parsed.unparsed,
     )
+
+
+def _instrument_labels(session: Session) -> dict[int, str]:
+    """Подписи справочника для расхождений: `domain/` в БД не ходит."""
+    return {
+        instrument.id: instrument.ticker or instrument.isin or instrument.name or ""
+        for instrument in session.scalars(select(Instrument))
+    }
 
 
 def _account_of(session: Session, report: RawReport) -> Account | None:
