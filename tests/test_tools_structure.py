@@ -280,3 +280,35 @@ def test_totals_do_not_double_count_a_repeated_trade(
 
     hint = next(item for item in lines if "сумма комиссий" in item)
     assert "-11.00" in hint
+
+
+def test_disputed_category_is_broken_down(
+    tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
+    """Разошедшаяся категория расшифровывается по строкам.
+
+    «В журнале −0.05» без состава — тупик: непонятно, лишняя это строка,
+    задвоенная или неверно разобранная. Состав печатается только для
+    разошедшихся: у сошедшихся он не нужен и утопил бы вывод.
+    """
+    source = (Path(__file__).parent / "fixtures" / "report_v2_2024-03.html").read_text("utf-8")
+    broken = tmp_path / "mismatch.html"
+    broken.write_text(source.replace("<td>-10.00</td>", "<td>-7.00</td>"), encoding="utf-8")
+
+    assert main(["parse", str(broken)]) == 0
+    out = capsys.readouterr().out
+
+    assert "из чего сложилось «FEE·BROKER» в журнале:" in out
+    # Номер сделки и раздел-источник: по ним строка находится в отчёте.
+    assert "B-000101-000001" in out
+    assert "5.1 Биржевые сделки" in out
+
+
+def test_matching_category_is_not_broken_down(capsys: pytest.CaptureFixture[str]) -> None:
+    """У сошедшейся категории состав не печатается."""
+    v2 = Path(__file__).parent / "fixtures" / "report_v2_2024-03.html"
+
+    main(["parse", str(v2)])
+    out = capsys.readouterr().out
+
+    assert "из чего сложилось" not in out

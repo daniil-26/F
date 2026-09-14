@@ -851,26 +851,34 @@ def _print_subkopeck(report: ParsedReport) -> None:
     print("  итог журнала отличается от брокерского на доли копейки по каждой такой строке")
 
 
-def _ours_by_category(operations: list[ParsedOperation]) -> dict[str, Decimal]:
+def _ours_by_category(
+    operations: list[ParsedOperation],
+) -> tuple[dict[str, Decimal], dict[str, list[ParsedOperation]]]:
     """Движение журнала теми же категориями, какими его печатает раздел 1.
+
+    Возвращает и итоги, и сами строки: при расхождении первый вопрос — из чего
+    сложилась наша сторона, и отвечать на него перебором списка операций
+    глазами не годится.
 
     Сделки берутся без комиссий: комиссия — отдельное событие (A-06), и войдя
     в «сальдо торговых операций», она посчиталась бы дважды.
     """
     totals: dict[str, Decimal] = {}
+    members: dict[str, list[ParsedOperation]] = {}
 
-    def add(key: str, value: Decimal) -> None:
-        totals[key] = totals.get(key, Decimal(0)) + value
+    def add(key: str, item: ParsedOperation) -> None:
+        totals[key] = totals.get(key, Decimal(0)) + item.amount
+        members.setdefault(key, []).append(item)
 
     for item in operations:
         if item.kind == "FEE":
-            add("FEE", item.amount)
-            add(_operation_label(item), item.amount)
+            add("FEE", item)
+            add(_operation_label(item), item)
         elif item.kind in ("BUY", "SELL"):
-            add("TRADE", item.amount)
+            add("TRADE", item)
         else:
-            add("NONTRADE", item.amount)
-    return totals
+            add("NONTRADE", item)
+    return totals, members
 
 
 def _reported_by_category(
@@ -906,8 +914,9 @@ def _print_category_comparison(
     movement: Decimal,
 ) -> None:
     """Расчётное против отчётного по каждой категории — строка к строке."""
-    ours = _ours_by_category(_settled_operations(report))
+    ours, members = _ours_by_category(_settled_operations(report))
     reported, orphans = _reported_by_category(rows)
+    disputed: list[str] = []
 
     print(
         f"\nсверка по категориям\n  {'параметр':<38}{'в отчёте':>15}"
@@ -922,12 +931,17 @@ def _print_category_comparison(
             continue
         title = " " * (2 * indent) + label
         print(f"  {title:<38}{_cell(theirs):>15}{_cell(mine):>15}{_gap(theirs, mine):>13}")
+        if mine is not None and theirs is not None and mine != theirs:
+            disputed.append(key)
 
     computed = None if opening is None else opening + movement
     print(
         f"  {'исходящий остаток (всего)':<38}{_cell(closing):>15}"
         f"{_cell(computed):>15}{_gap(closing, computed):>13}"
     )
+
+    for key in disputed:
+        _print_breakdown(key, members.get(key, []))
 
     missing = sorted(set(ours) - set(reported) - {"FEE"})
     if missing:
@@ -939,6 +953,26 @@ def _print_category_comparison(
         print("\n  строки раздела 1 без пары в журнале (сравнить глазами):")
         for label, value in orphans:
             print(f"    {label:<36}{value:>15}")
+
+
+def _print_breakdown(category: str, operations: list[ParsedOperation]) -> None:
+    """Из каких строк сложилась наша сторона категории.
+
+    Печатается только для разошедшихся: у сошедшихся состав не нужен, а вывод
+    он бы утопил. Колонка «источник» — примечание операции, и по нему видно
+    раздел: у комиссии сделки там подпись раздела, у комиссии займа — часть
+    сделки («1-я часть», «2-я часть»).
+    """
+    if not operations:
+        return
+
+    print(f"\n  из чего сложилось «{category}» в журнале:")
+    for item in sorted(operations, key=lambda row: (row.trade_date, row.amount)):
+        name = (item.ticker or item.isin or "—")[:20]
+        source = (item.note or "—")[:34]
+        trade_no = item.broker_trade_no or "—"
+        print(f"    {item.trade_date} {name:<20}{item.amount:>12}  {trade_no:<18}{source}")
+    print(f"    {'итого':<31}{sum(i.amount for i in operations):>12}")
 
 
 def _cell(value: Decimal | None) -> str:
