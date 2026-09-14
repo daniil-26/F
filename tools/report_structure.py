@@ -743,6 +743,7 @@ def _print_cash_summary(path: Path, report: ParsedReport) -> None:
         print("  входящий или исходящий остаток не найден — сверить нечем")
 
     _print_fee_comparison(rows, report)
+    _print_subkopeck(report)
 
 
 def _settled_operations(report: ParsedReport) -> list[ParsedOperation]:
@@ -787,6 +788,30 @@ def _settled_operations(report: ParsedReport) -> list[ParsedOperation]:
             continue
         result.append(item)
     return result
+
+
+def _print_subkopeck(report: ParsedReport) -> None:
+    """Суммы точнее копейки — вторая причина расхождений в сотых долях.
+
+    Отчёт печатает числа с четырьмя и шестью знаками после точки (цена, курс
+    валютной пары). Если такая точность попала в денежный эффект, наш итог
+    отличается от брокерского на доли копейки по каждой операции, а брокер
+    округляет поштучно. Проекции ничего не округляют намеренно (спека: деньги —
+    только Decimal), поэтому находка означает ошибку разбора, а не потерю.
+    """
+    odd = [
+        item
+        for item in report.operations
+        if item.amount != item.amount.quantize(Decimal("0.01"))
+    ]
+    if not odd:
+        return
+
+    print(f"\nсуммы точнее копейки: {len(odd)}")
+    for item in odd[:10]:
+        name = item.ticker or item.isin or "—"
+        print(f"  {item.trade_date} {_operation_label(item):<16}{name:<24}{item.amount:>18}")
+    print("  итог журнала отличается от брокерского на доли копейки по каждой такой строке")
 
 
 def _print_fee_comparison(
