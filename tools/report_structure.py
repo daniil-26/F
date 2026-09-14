@@ -80,8 +80,32 @@ from _report_grid import (
 )
 from anonymize_report import AliasStore, Anonymizer, Options
 
+from portfolio.adapters.broker.anchors import is_known_column as _is_known_column_v2
+from portfolio.adapters.broker.anchors import normalize_signature
 from portfolio.adapters.broker.dto import ParsedOperation, ParsedReport
 from portfolio.adapters.broker.mapping import parse as parse_with_mapping
+from portfolio.adapters.broker.sections import split_sections
+from portfolio.adapters.broker.tables import extract_tables as _extract_tables_v2
+from portfolio.adapters.formats import FormatError, is_blank, parse_decimal
+from portfolio.domain.events import KeyInput, assign_natural_keys
+
+# Подписи раздела 1 → вид комиссии в журнале. Сравнение по видам и есть смысл
+# сводки: «комиссия брокера» брокера обязана сойтись с нашими FEE·BROKER.
+_FEE_LABELS: tuple[tuple[str, str], ...] = (
+    ("комиссия брокера", "FEE·BROKER"),
+    ("комиссия торговой системы", "FEE·EXCHANGE"),
+    ("гербовый сбор", "FEE·STAMP"),
+    ("комиссия депозитария брокера", "FEE·DEPOSITARY"),
+    ("комиссия иных депозитариев", "FEE·DEPOSITARY"),
+)
+
+# Строка «Входящий остаток (всего):» несёт не сумму, а код валюты колонки
+# (A-25), само число стоит ниже. Поэтому итог ищется по нескольким подписям в
+# порядке предпочтения, а строки с «плановый» исключаются: плановый остаток
+# включает неисполненные обязательства и с журналом не сойдётся.
+_OPENING_LABELS = ("входящий остаток всего", "входящий остаток в том числе")
+_CLOSING_LABELS = ("исходящий остаток всего", "исходящий остаток в том числе")
+_PLANNED_MARKER = "плановый"
 
 # Колонки, значения которых образуют словарь предметных типов: именно их
 # полноту и проверяет шаг 0.
@@ -594,6 +618,7 @@ def print_parse(path: Path) -> None:
         )
 
     _print_totals(report)
+    _print_cash_summary(path, report)
     _print_hints(report)
 
     print("\nконтрольные остатки из отчёта")
@@ -626,6 +651,173 @@ def _print_totals(report: ParsedReport) -> None:
         totals[currency] = totals.get(currency, Decimal(0)) + total
     for currency, total in sorted(totals.items()):
         print(f"  {'движение денег за период':<25}{total:>18}  {currency}")
+
+
+def _cash_section_rows(path: Path) -> list[tuple[int, str, list[Decimal]]]:
+    """Раздел 1 как есть: отступ, подпись строки, числа в ней.
+
+    Раздел — не таблица, а блок «метка → значение»: слева подпись, справа
+    колонка на каждую валюту. Отступ (номер колонки подписи) несёт иерархию:
+    «в том числе» и его составляющие.
+    """
+    tables = _extract_tables_v2(path.read_bytes())
+    rows: list[tuple[int, str, list[Decimal]]] = []
+
+    for section in split_sections(tables, known_header=_known_v2):
+        if section.number not in ("1", "1.1"):
+            continue
+        for row in section.table.row_cells:
+            cells = [cell for cell in row if cell.text and not is_blank(cell.text)]
+            if not cells:
+                continue
+            label = cells[0].text.strip()
+            numbers: list[Decimal] = []
+            for cell in cells[1:]:
+                try:
+                    numbers.append(parse_decimal(cell.text))
+                except FormatError:
+                    continue
+            if _looks_numeric(label):
+                continue
+            rows.append((cells[0].column, label, numbers))
+    return rows
+
+
+def _looks_numeric(text: str) -> bool:
+    """Подпись строки не бывает числом: такая ячейка — значение без метки."""
+    try:
+        parse_decimal(text)
+    except FormatError:
+        return False
+    return True
+
+
+def _known_v2(text: str) -> bool:
+    from portfolio.adapters.broker.anchors import COLUMNS_V2
+
+    return _is_known_column_v2(text, COLUMNS_V2)
+
+
+def _find_total(
+    rows: list[tuple[int, str, list[Decimal]]], markers: tuple[str, ...]
+) -> Decimal | None:
+    for marker in markers:
+        for _, label, numbers in rows:
+            signature = normalize_signature(label)
+            if signature == marker and numbers and _PLANNED_MARKER not in signature:
+                return numbers[-1]
+    return None
+
+
+def _print_cash_summary(path: Path, report: ParsedReport) -> None:
+    """Разложение остатка глазами брокера рядом с итогами журнала.
+
+    Отвечает на вопрос «куда делись деньги» точнее, чем итог по типам: раздел 1
+    печатает свободные средства и комиссии по видам, то есть те же категории,
+    что и журнал, но независимо от нашего разбора.
+    """
+    rows = _cash_section_rows(path)
+    if not rows:
+        print("\nденежная сводка: раздела 1 в отчёте нет")
+        return
+
+    print("\nразложение остатка по отчёту (раздел 1)")
+    for indent, label, numbers in rows:
+        shift = 2 if indent else 0
+        title = " " * shift + label
+        values = "  ".join(f"{value:>16}" for value in numbers) if numbers else ""
+        print(f"  {title:<46}{values}")
+
+    opening = _find_total(rows, _OPENING_LABELS)
+    closing = _find_total(rows, _CLOSING_LABELS)
+    movement = sum((item.amount for item in _settled_operations(report)), Decimal(0))
+
+    print("\nсходимость денег")
+    print(f"  {'входящий остаток (всего)':<44}{_or_dash(opening):>16}")
+    print(f"  {'движение по журналу':<44}{movement:>16}")
+    if opening is not None and closing is not None:
+        print(f"  {'получается на конец':<44}{opening + movement:>16}")
+        print(f"  {'исходящий остаток (всего) по отчёту':<44}{closing:>16}")
+        print(f"  {'РАСХОЖДЕНИЕ':<44}{opening + movement - closing:>16}")
+    else:
+        print("  входящий или исходящий остаток не найден — сверить нечем")
+
+    _print_fee_comparison(rows, report)
+
+
+def _settled_operations(report: ParsedReport) -> list[ParsedOperation]:
+    """Операции, попадающие в остаток на конец периода.
+
+    Два отсева, и оба повторяют поведение журнала, иначе сводка не сойдётся
+    даже на верном разборе:
+
+    * **повторы**. Сделка конца месяца печатается и в 5.1, и в 5.10 следующего
+      отчёта (A-22). В журнале второе вхождение схлопывается ключом
+      идемпотентности, поэтому и здесь считается один раз. Ключ берётся из
+      `domain/events.py`, а не переписывается: два разных правила ключа
+      разошлись бы молча;
+    * **дата**. Деньги считаются по дате оплаты, и сделка, расчёты по которой
+      приходятся на следующий период, в исходящий остаток не входит.
+    """
+    keys = assign_natural_keys(
+        [
+            KeyInput(
+                account_code=report.account_code or "",
+                kind=item.kind,
+                trade_date=item.trade_date,
+                instrument_ref=item.isin or item.ticker,
+                quantity=item.quantity,
+                price=item.price,
+                amount=item.amount,
+                fee_kind=item.fee_kind,
+                broker_trade_no=item.broker_trade_no,
+            )
+            for item in report.operations
+        ]
+    )
+
+    seen: set[str] = set()
+    result: list[ParsedOperation] = []
+    for item, key in zip(report.operations, keys, strict=True):
+        if key in seen:
+            continue
+        seen.add(key)
+        effective = item.settlement_date or item.trade_date
+        if report.period_end is not None and effective > report.period_end:
+            continue
+        result.append(item)
+    return result
+
+
+def _print_fee_comparison(
+    rows: list[tuple[int, str, list[Decimal]]], report: ParsedReport
+) -> None:
+    """Комиссии по видам: строка брокера против наших событий FEE."""
+    ours: dict[str, Decimal] = {}
+    for item in report.operations:
+        if item.kind != "FEE":
+            continue
+        key = _operation_label(item)
+        ours[key] = ours.get(key, Decimal(0)) + item.amount
+
+    matched: list[tuple[str, Decimal, Decimal]] = []
+    for _, label, numbers in rows:
+        signature = normalize_signature(label)
+        for marker, fee_kind in _FEE_LABELS:
+            if signature == marker and numbers:
+                matched.append((label, numbers[-1], ours.get(fee_kind, Decimal(0))))
+
+    if not matched:
+        return
+
+    print(f"\nкомиссии по видам\n  {'строка отчёта':<36}{'в отчёте':>16}{'в журнале':>16}"
+          f"{'разница':>14}")
+    for label, reported, mine in matched:
+        print(f"  {label:<36}{reported:>16}{mine:>16}{mine - reported:>14}")
+
+
+def _or_dash(value: Decimal | None) -> str:
+    return "—" if value is None else str(value)
 
 
 def _print_hints(report: ParsedReport) -> None:

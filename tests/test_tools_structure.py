@@ -211,3 +211,43 @@ def test_parse_shows_what_the_parser_made_of_the_report(capsys: pytest.CaptureFi
     # Три подсказки отвечают за три незакрытых допущения.
     assert "A-07" in out and "A-04" in out and "A-06" in out
     assert "нераспознанные строки: 0" in out
+
+
+def test_parse_reconciles_cash_against_section_one(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Сводка сводит движение журнала с разложением остатка по разделу 1.
+
+    Это и есть ответ на вопрос «куда делись деньги»: раздел 1 печатает
+    свободные средства и комиссии по видам независимо от нашего разбора,
+    поэтому расхождение локализуется до категории, а не до отчёта целиком.
+    """
+    v2 = Path(__file__).parent / "fixtures" / "report_v2_2024-03.html"
+
+    assert main(["parse", str(v2)]) == 0
+    out = capsys.readouterr().out
+
+    assert "разложение остатка по отчёту (раздел 1)" in out
+    # Итог сходится: 100 000.00 + 3 919.00 = 103 919.00.
+    assert "РАСХОЖДЕНИЕ" in out
+    line = next(item for item in out.splitlines() if "РАСХОЖДЕНИЕ" in item)
+    assert line.split()[-1] == "0.00"
+    # Комиссии сверяются по видам против строк раздела 1.
+    assert "комиссия Брокера" in out and "комиссия торговой системы" in out
+
+
+def test_cash_summary_counts_a_repeated_trade_once(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    """Сделка печатается и в 5.1, и в 5.10 (A-22).
+
+    Журнал схлопывает повтор ключом идемпотентности, и сводка обязана делать
+    то же: сложенная дважды покупка дала бы расхождение на верном разборе.
+    """
+    v2 = Path(__file__).parent / "fixtures" / "report_v2_2024-03.html"
+
+    main(["parse", str(v2)])
+    out = capsys.readouterr().out
+
+    movement = next(item for item in out.splitlines() if "движение по журналу" in item)
+    assert movement.split()[-1] == "3919.00"
