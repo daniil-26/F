@@ -11,8 +11,10 @@
   сделки в разделах 5.1 и 5.10 схлопывается ключом идемпотентности;
 * A-23 — бумага сделки восстанавливается по справочнику из раздела 2: в
   подзаголовке группы есть наименование и номер гос. регистрации, но нет ISIN;
-* A-24 — разделы займа (5.4, 5.9) в журнал не попадают: заём брокером не меняет
-  ни позицию, ни остаток, а вознаграждение приходит отдельной строкой в 8.1;
+* A-21 — заём бумаг брокером не меняет позицию, но двигает деньги: в разделе
+  5.4 вознаграждение стоит в колонке «% по сделке» строки возврата, и это сумма
+  в рублях, а не ставка. Раздел 5.9 (незавершённые сделки) пропускается: расчётов
+  по ним ещё не было, деньги придут в 5.4 следующего отчёта (A-24);
 * A-25 — контрольный денежный остаток берётся из строки «Исходящий остаток
   (всего)», а не «плановый»: плановый включает неисполненные обязательства.
 """
@@ -65,6 +67,7 @@ CASH_STATE_SECTIONS = ("1", "1.1")
 SECURITY_BALANCE_SECTIONS = ("2",)
 TRADE_SECTIONS = ("5.1", "5.10")
 CASH_OPERATION_SECTIONS = ("8.1", "8.1.1")
+LOAN_SECTIONS = ("5.4",)
 SECURITY_OPERATION_SECTIONS = ("8.2",)
 
 # Разделы, которые пропускаются осознанно, с причиной. Молча пропущенный раздел —
@@ -72,8 +75,7 @@ SECURITY_OPERATION_SECTIONS = ("8.2",)
 SKIPPED_SECTIONS: dict[str, str] = {
     "4": "оценка активов — производные числа, а не операции",
     "5": "заголовок группы разделов, строк не содержит",
-    "5.4": "заём ценных бумаг: не меняет ни позицию, ни остаток (A-24)",
-    "5.9": "незавершённые сделки займа: то же самое (A-24)",
+    "5.9": "незавершённые сделки займа: расчётов ещё не было, деньги придут в 5.4 (A-24)",
     "5.11": "заём ценных бумаг: не меняет ни позицию, ни остаток (A-24)",
     "8": "заголовок группы разделов, строк не содержит",
 }
@@ -100,6 +102,12 @@ SECURITY_OPERATION_TYPES: dict[str, tuple[str, int]] = {
     "погашение облигации": ("MATURITY", -1),
     "конвертация цб": ("CONVERSION", 0),
 }
+
+# Виды сделок раздела 5.4. Позицию заём не меняет: бумаги остаются в
+# собственности (A-21). Деньги приносит только возврат — вознаграждение стоит в
+# колонке «% по сделке» его строки, у выдачи она пуста.
+LOAN_RETURN = "возврат займа ценных бумаг"
+LOAN_ISSUE = "выдача займа ценных бумаг"
 
 # Строка-маркер: погашение облигации в денежном разделе идёт с нулевой суммой,
 # деньги приходят отдельной строкой «Погашение номинала» (подтверждено владельцем
@@ -173,6 +181,8 @@ def parse(content: bytes, tables: list[RawTable] | None = None) -> ParsedReport:
             _collect(_cash_balances(section, header), balances, unparsed)
         elif number in TRADE_SECTIONS:
             _collect(_trades(section, header, instruments), operations, unparsed)
+        elif number in LOAN_SECTIONS:
+            _collect(_loan_operations(section, header, instruments), operations, unparsed)
         elif number in CASH_OPERATION_SECTIONS:
             _collect(_cash_operations(section, header, instruments), operations, unparsed)
         elif number in SECURITY_OPERATION_SECTIONS:
@@ -494,6 +504,99 @@ def _fee_operations(
             fee_kind=fee_kind,
             broker_trade_no=_value(row, columns, "broker_trade_no"),
             note=label,
+            raw_row=dict(row),
+        )
+
+
+# -- раздел 5.4: заём ценных бумаг ------------------------------------------
+
+
+def _loan_operations(
+    section: ReportSection, header: _Header, instruments: _Instruments
+) -> Iterator[ParsedOperation | UnparsedRow]:
+    """Заём бумаг брокером: позиции не меняет, но деньги двигает (A-21).
+
+    Бумаги остаются в собственности, поэтому количества здесь нет ни у выдачи,
+    ни у возврата. В журнал идут только деньги: вознаграждение из колонки «% по
+    сделке» строки возврата и брокерская комиссия строки, если она ненулевая.
+    """
+    columns = resolve_columns(section.table, COLUMNS_V2)
+    rows = section.table.as_dicts()
+
+    for index, row in enumerate(rows):
+        group = section.group_of(index) or ""
+        if _is_summary_row(row) or _is_service_row(row) or _is_summary_group(group):
+            continue
+        try:
+            yield from _loan_row(row, columns, header, instruments, group, section.title)
+        except (FormatError, ValueError) as error:
+            yield UnparsedRow(table=section.title, row=row, reason=str(error))
+
+
+def _loan_row(
+    row: dict[str, str],
+    columns: dict[str, str],
+    header: _Header,
+    instruments: _Instruments,
+    group: str,
+    label: str,
+) -> Iterator[ParsedOperation | UnparsedRow]:
+    direction = normalize_signature(_value(row, columns, "direction") or "")
+    if direction not in (LOAN_RETURN, LOAN_ISSUE):
+        yield UnparsedRow(
+            table=label, row=row, reason=f"вид сделки займа не опознан: {direction!r}"
+        )
+        return
+
+    trade_date = parse_date(_require(row, columns, "trade_date"))
+    settlement_date = (
+        parse_optional_date(_value(row, columns, "settlement_date"))
+        or parse_optional_date(_value(row, columns, "settlement_planned"))
+        or trade_date
+    )
+    ticker, isin = _instrument_of(group, instruments)
+    currency = _currency(row, columns, "amount_currency", header)
+    trade_no = _value(row, columns, "broker_trade_no")
+    note = _value(row, columns, "loan_kind") or group or None
+
+    if direction == LOAN_RETURN:
+        # «% по сделке» — сумма вознаграждения в валюте расчётов, а не ставка:
+        # разность с комиссией сошлась с расхождением сверки до копейки (A-21).
+        reward = parse_optional_decimal(_value(row, columns, "rate"))
+        if reward is not None and reward != 0:
+            yield ParsedOperation(
+                kind="LENDING_INCOME",
+                trade_date=trade_date,
+                settlement_date=settlement_date,
+                ticker=ticker,
+                isin=isin,
+                instrument_name=ticker,
+                # Количества нет: заём не меняет позицию, бумаги остаются
+                # в собственности (A-21).
+                quantity=None,
+                price=None,
+                amount=abs(reward),
+                currency=currency,
+                broker_trade_no=trade_no,
+                note=note,
+                raw_row=dict(row),
+            )
+
+    fee = parse_optional_decimal(_value(row, columns, "fee_broker"))
+    if fee is not None and fee != 0:
+        yield ParsedOperation(
+            kind="FEE",
+            trade_date=trade_date,
+            settlement_date=settlement_date,
+            ticker=ticker,
+            isin=isin,
+            quantity=None,
+            price=None,
+            amount=-abs(fee),
+            currency=_currency(row, columns, "fee_currency", header),
+            fee_kind="BROKER",
+            broker_trade_no=trade_no,
+            note=note,
             raw_row=dict(row),
         )
 

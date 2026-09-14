@@ -90,6 +90,10 @@ class EventType(enum.StrEnum):
     SELL = "SELL"
     COUPON = "COUPON"
     DIVIDEND = "DIVIDEND"
+    # Вознаграждение за заём бумаг брокером. Не `CASH_IN`: деньги не приходят
+    # извне, их зарабатывает сам портфель, а `CASH_IN` числится внешним потоком
+    # и завысил бы приток, занизив доходность (A-21).
+    LENDING_INCOME = "LENDING_INCOME"
     AMORTIZATION = "AMORTIZATION"
     MATURITY = "MATURITY"
     FX_CONVERT = "FX_CONVERT"

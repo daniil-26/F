@@ -23,6 +23,7 @@ from portfolio.adapters.broker.sections import split_sections
 from portfolio.adapters.broker.tables import extract_tables
 from portfolio.cli import app
 from portfolio.jobs.import_broker import import_broker_report
+from portfolio.models import EventType
 
 runner = CliRunner()
 
@@ -142,15 +143,25 @@ def test_totals_and_venue_turnover_are_not_trades(report: ParsedReport) -> None:
     assert report.unparsed == ()
 
 
-def test_loan_sections_are_skipped_deliberately(report: ParsedReport) -> None:
-    """A-24: заём бумаг не меняет ни позицию, ни остаток.
+def test_loan_issue_moves_neither_position_nor_money(report: ParsedReport) -> None:
+    """Выдача займа: бумаги остаются в собственности, денег она не приносит.
 
-    Пропуск именно осознанный: раздел перечислен с причиной, а его строки не
-    уходят ни в журнал, ни в нераспознанное.
+    Вознаграждение приходит только с возвратом, поэтому строка выдачи не
+    порождает события — но и в нераспознанное не уходит.
     """
-    assert "5.4" in SKIPPED_SECTIONS
-    assert all("займ" not in (item.note or "").lower() for item in report.operations)
+    assert _of_kind(report, "LENDING_INCOME") == []
+    assert all(item.quantity is None for item in _of_kind(report, "FEE"))
     assert report.unparsed == ()
+
+
+def test_unsettled_loan_section_stays_skipped() -> None:
+    """A-24: раздел 5.9 — незавершённые сделки, расчётов по ним ещё не было.
+
+    Деньги по ним придут в 5.4 следующего отчёта. Учесть их здесь значило бы
+    задвоить вознаграждение, поэтому пропуск объявлен с причиной.
+    """
+    assert "5.9" in SKIPPED_SECTIONS
+    assert "5.4" not in SKIPPED_SECTIONS
 
 
 # -- неторговые операции -----------------------------------------------------
@@ -308,3 +319,68 @@ def test_unknown_isin_shaped_token_still_identifies_the_paper() -> None:
 
     assert trade.isin == "MC0123456789"
     assert trade.ticker is None
+
+
+_LOAN_REPORT = """<html><body><table>
+<tr><td>Номер счета клиента</td><td>СЧЕТ-77</td></tr>
+<tr><td>за период с 01.03.2024 по 31.03.2024</td></tr>
+<tr><td>2. Состояние портфеля ценных бумаг</td></tr>
+<tr><td>Наименование ЦБ</td><td>Эмитент</td><td>Номер гос. регистрации</td><td>ISIN</td>
+    <td>Количество ЦБ на начало периода, шт.</td><td>Количество ЦБ на конец периода, шт.</td></tr>
+<tr><td>Сбер ао</td><td>ЭМИТЕНТ-01</td><td>10301481B</td><td>RU0009029540</td>
+    <td>10</td><td>10</td></tr>
+<tr><td>5.4 Сделки займа ценных бумаг</td></tr>
+<tr><td>Номер сделки</td><td>Дата сделки</td><td>Вид сделки</td><td>Количество ЦБ, шт.</td>
+    <td>Сумма сделки</td><td>% по сделке</td><td>Валюта суммы сделки</td>
+    <td>Брокерская комиссия</td><td>Валюта брокерской комиссии</td>
+    <td>Тип сделки займа</td><td>Дата оплаты</td></tr>
+<tr><td>ПАО "Сбербанк России" Сбер ао 10301481B RUR</td></tr>
+<tr><td>B-000101-000003</td><td>18.03.2024</td><td>Выдача займа ценных бумаг</td><td>10</td>
+    <td>3 000.00</td><td></td><td>RUR</td><td>0.00</td><td>RUR</td>
+    <td>1-я часть</td><td>19.03.2024</td></tr>
+<tr><td>B-000101-000004</td><td>19.03.2024</td><td>Возврат займа ценных бумаг</td><td>10</td>
+    <td>3 000.00</td><td>0.25</td><td>RUR</td><td>0.07</td><td>RUR</td>
+    <td>2-я часть</td><td>20.03.2024</td></tr>
+</table></body></html>"""
+
+
+def test_loan_return_brings_income_and_fee() -> None:
+    """A-21, закрыто прогоном по архиву: «% по сделке» — сумма вознаграждения.
+
+    Что это рубли, а не ставка, показала сверка: разность вознаграждения и
+    брокерской комиссии по разделу совпала с расхождением до копейки.
+    """
+    report = parse(_LOAN_REPORT.encode("utf-8"))
+
+    (income,) = _of_kind(report, "LENDING_INCOME")
+    assert income.amount == Decimal("0.25")
+    assert income.trade_date.isoformat() == "2024-03-19"
+    assert income.ticker == "Сбер ао", "бумага берётся из подзаголовка группы (A-23)"
+    # Позицию заём не меняет: бумаги остаются в собственности.
+    assert income.quantity is None
+
+    (fee,) = _of_kind(report, "FEE")
+    assert fee.amount == Decimal("-0.07")
+    assert fee.fee_kind == "BROKER"
+
+    assert report.unparsed == ()
+
+
+def test_lending_income_is_not_an_external_flow() -> None:
+    """Деньги не приходят извне — их зарабатывает сам портфель.
+
+    Записанное как `CASH_IN`, вознаграждение завысило бы внешний приток и
+    занизило доходность, а инвариант «external_flow равен сумме внешних
+    событий» остался бы выполненным и считал бы неверно.
+    """
+    from portfolio.domain.events import is_external
+
+    assert not is_external(EventType.LENDING_INCOME)
+
+
+def test_zero_reward_does_not_become_an_event() -> None:
+    """Нулевое вознаграждение — не событие: ноль в append-only журнале потом
+    неотличим от ошибки импорта (то же правило, что и в A-20)."""
+    report = parse(_LOAN_REPORT.replace("<td>0.25</td>", "<td>0.00</td>").encode("utf-8"))
+
+    assert _of_kind(report, "LENDING_INCOME") == []
