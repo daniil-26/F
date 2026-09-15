@@ -191,8 +191,10 @@ class Instrument(Base):
     )
     currency: Mapped[str | None] = mapped_column(String(3))
 
+    # Уникален только ISIN: он идентифицирует бумагу. Наименование её лишь
+    # подписывает, и брокер его переиспользует — после конвертации старый и
+    # новый выпуски печатаются под одним именем (A-28).
     __table_args__ = (
-        UniqueConstraint("ticker", name="uq_instruments_ticker"),
         UniqueConstraint("isin", name="uq_instruments_isin"),
         CheckConstraint(
             "ticker IS NOT NULL OR isin IS NOT NULL",

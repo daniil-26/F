@@ -12,6 +12,7 @@ from decimal import Decimal
 from pathlib import Path
 
 import pytest
+from sqlalchemy.orm import Session
 from typer.testing import CliRunner
 
 from conftest import FIXTURES
@@ -22,8 +23,9 @@ from portfolio.adapters.broker.mapping_v2 import MAPPING_VERSION, SKIPPED_SECTIO
 from portfolio.adapters.broker.sections import split_sections
 from portfolio.adapters.broker.tables import extract_tables
 from portfolio.cli import app
+from portfolio.domain.instruments import InstrumentResolver
 from portfolio.jobs.import_broker import import_broker_report
-from portfolio.models import EventType
+from portfolio.models import EventType, Instrument, InstrumentKind
 
 runner = CliRunner()
 
@@ -495,3 +497,59 @@ def test_same_gap_without_loans_stops_the_import(database: Path, tmp_path: Path)
     assert not result.committed
     assert result.reconcile.tolerated == ()
     assert result.reconcile.discrepancies
+
+
+def test_same_name_with_a_new_isin_is_another_security(session: Session) -> None:
+    """A-28: конвертация выпускает бумагу с тем же именем и новым ISIN.
+
+    Считая их одной записью, списание старого выпуска и зачисление нового
+    схлопываются, и количества расходятся ровно на размер позиции.
+    """
+    resolver = InstrumentResolver(session)
+
+    old = resolver.resolve(ticker="Акция", isin="RU0000000001")
+    new = resolver.resolve(ticker="Акция", isin="RU0000000002")
+
+    assert old is not None and new is not None
+    assert old.id != new.id
+
+
+def test_unidentified_record_is_enriched_not_duplicated(session: Session) -> None:
+    """Запись без ISIN ещё не опознана — ISIN отчёта её дозаполняет.
+
+    Конфликта здесь нет: спорить может только другой ISIN, а не его отсутствие.
+    """
+    resolver = InstrumentResolver(session)
+
+    blank = resolver.resolve(ticker="Акция")
+    filled = resolver.resolve(ticker="Акция", isin="RU0000000001")
+
+    assert blank is not None and filled is not None
+    assert blank.id == filled.id
+    assert filled.isin == "RU0000000001"
+
+
+def test_lookup_by_name_alone_prefers_the_unidentified_record(session: Session) -> None:
+    """Наименование больше не уникально, и выбор обязан быть объявленным.
+
+    Предпочтение — записи без ISIN: она ещё не опознана, и ISIN отчёта её
+    дозаполнит. Молча взять первую попавшуюся значило бы привязать операции к
+    случайному выпуску.
+    """
+    identified = Instrument(ticker="АКЦИЯ", isin="RU0000000001", kind=InstrumentKind.SHARE)
+    unidentified = Instrument(ticker="АКЦИЯ", kind=InstrumentKind.SHARE)
+    session.add_all([identified, unidentified])
+    session.flush()
+
+    found = InstrumentResolver(session).find(ticker="Акция")
+
+    assert found is not None
+    assert found.id == unidentified.id
+
+
+def test_lookup_by_name_never_returns_another_issue(session: Session) -> None:
+    """Явный и другой ISIN не перекрывается совпадением наименования."""
+    session.add(Instrument(ticker="АКЦИЯ", isin="RU0000000001", kind=InstrumentKind.SHARE))
+    session.flush()
+
+    assert InstrumentResolver(session).find(ticker="Акция", isin="RU0000000002") is None
