@@ -34,6 +34,10 @@ class Settings(BaseSettings):
     reconcile_cash_tolerance: Decimal = Field(default=Decimal("0.01"))
     reconcile_quantity_tolerance: Decimal = Field(default=Decimal("0"))
 
+    # Мягкий допуск на деньги для отчётов с займом бумаг (A-27). Ноль отключает
+    # послабление и возвращает строгую сверку.
+    reconcile_loan_tolerance: Decimal = Field(default=Decimal("1.00"))
+
     @property
     def raw_dir(self) -> Path:
         return self._absolute(self.data_raw_dir)

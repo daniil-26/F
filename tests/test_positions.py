@@ -214,3 +214,61 @@ def test_cash_transfer_without_instrument_is_not_a_position() -> None:
     rows = [_row(1, EventType.TRANSFER, trade_date=date(2024, 3, 5), instrument_id=None)]
 
     assert positions_on(rows, date(2024, 3, 31)) == {}
+
+
+def test_soft_tolerance_keeps_the_discrepancy_visible() -> None:
+    """A-27: расхождение в пределах мягкого допуска не роняет импорт.
+
+    Но и не исчезает: остаток накопителен, и принятая копейка тащится во все
+    следующие месяцы. Молча проглоченное расхождение через год неотличимо от
+    верных данных.
+    """
+    rows = [_row(1, EventType.CASH_IN, trade_date=date(2024, 3, 1), amount="100.00")]
+
+    result = reconcile(
+        rows,
+        [ExpectedBalance(kind="cash", quantity=Decimal("100.30"), currency="RUB", label="RUB")],
+        soft_cash_tolerance=Decimal("1.00"),
+    )
+
+    assert result.ok
+    assert result.discrepancies == ()
+    (tolerated,) = result.tolerated
+    assert tolerated.difference == Decimal("-0.30")
+
+
+def test_soft_tolerance_does_not_cover_a_large_gap() -> None:
+    rows = [_row(1, EventType.CASH_IN, trade_date=date(2024, 3, 1), amount="100.00")]
+
+    result = reconcile(
+        rows,
+        [ExpectedBalance(kind="cash", quantity=Decimal("102.00"), currency="RUB", label="RUB")],
+        soft_cash_tolerance=Decimal("1.00"),
+    )
+
+    assert not result.ok
+    assert result.tolerated == ()
+
+
+def test_soft_tolerance_never_covers_quantities() -> None:
+    """«Почти столько же акций» не бывает: количество обязано сходиться точно."""
+    rows = [
+        _row(1, EventType.BUY, trade_date=date(2024, 3, 1), quantity="10", instrument_id=1)
+    ]
+
+    result = reconcile(
+        rows,
+        [
+            ExpectedBalance(
+                kind="security",
+                quantity=Decimal("10.3"),
+                currency="RUB",
+                instrument_id=1,
+                label="SBER",
+            )
+        ],
+        soft_cash_tolerance=Decimal("1.00"),
+    )
+
+    assert not result.ok
+    assert result.tolerated == ()

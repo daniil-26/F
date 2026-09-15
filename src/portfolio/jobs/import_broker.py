@@ -17,12 +17,18 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
 from sqlalchemy.orm import Session
 
-from portfolio.adapters.broker.dto import ParsedBalance, ParsedOperation, UnparsedRow
+from portfolio.adapters.broker.dto import (
+    ParsedBalance,
+    ParsedOperation,
+    ParsedReport,
+    UnparsedRow,
+)
 from portfolio.adapters.broker.mapping import MAPPING_VERSION, parse
 from portfolio.adapters.files import discover_reports
 from portfolio.config import Settings, get_settings
@@ -224,6 +230,7 @@ def import_broker_report(
             cash_tolerance=config.reconcile_cash_tolerance,
             quantity_tolerance=config.reconcile_quantity_tolerance,
             labels=_instrument_labels(session),
+            soft_cash_tolerance=_soft_tolerance(report, config),
         )
 
         # ── граница --dry-run ──
@@ -352,6 +359,16 @@ def _instrument_ref(operation: ParsedOperation, instrument: Instrument | None) -
     if instrument is not None:
         return instrument.isin or instrument.ticker
     return operation.isin or operation.ticker
+
+
+def _soft_tolerance(report: ParsedReport, config: Settings) -> Decimal:
+    """Мягкий допуск на деньги — только для отчётов с займом бумаг (A-27).
+
+    Расчёты по займу ложатся на границу месяца, и копейки там стоят дороже, чем
+    стоят. К отчётам без займа послабление не применяется: там расхождение
+    означает ошибку разбора, а не неточность.
+    """
+    return config.reconcile_loan_tolerance if report.has_loan_section else Decimal(0)
 
 
 def _instrument_labels(session: Session) -> dict[int, str]:

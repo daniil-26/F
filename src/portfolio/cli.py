@@ -188,6 +188,7 @@ def _print_import(result: ImportResult) -> None:
         console.print(unparsed)
 
     _print_reconcile(result.reconcile.discrepancies)
+    _print_tolerated(result.reconcile.tolerated)
 
     if result.dry_run:
         console.print("[yellow]--dry-run: ничего не записано.[/yellow]")
@@ -300,6 +301,9 @@ def _print_check(result: CheckResult) -> None:
         if report.result.discrepancies:
             console.print(f"[red]Расхождения: {report.filename}[/red]")
             _print_reconcile(report.result.discrepancies)
+        if report.result.tolerated:
+            console.print(f"[yellow]Принято в пределах допуска: {report.filename}[/yellow]")
+            _print_tolerated(report.result.tolerated)
 
     if result.violations:
         violations = Table(title="Нарушенные инварианты", style="red")
@@ -312,6 +316,31 @@ def _print_check(result: CheckResult) -> None:
     console.print(f"Событий в журнале: {result.transactions}")
     if result.ok:
         console.print("[green]Сверка сошлась по всем отчётам, инварианты выполнены.[/green]")
+
+
+def _print_tolerated(tolerated: tuple) -> None:  # type: ignore[type-arg]
+    """Расхождение в пределах мягкого допуска (A-27).
+
+    Печатается всегда: остаток накопителен, и принятая копейка тащится во все
+    следующие месяцы. Молчание здесь превратило бы допуск в тихий дрейф.
+    """
+    if not tolerated:
+        return
+    table = Table(title="Принято в пределах допуска (A-27)", style="yellow")
+    table.add_column("Вид")
+    table.add_column("Объект")
+    table.add_column("В отчёте", justify="right")
+    table.add_column("В журнале", justify="right")
+    table.add_column("Разница", justify="right")
+    for item in tolerated:
+        table.add_row(
+            item.kind, item.label, str(item.expected), str(item.actual), str(item.difference)
+        )
+    console.print(table)
+    console.print(
+        "[yellow]Расхождение принято: отчёт содержит заём бумаг. "
+        "Остаток накопителен — следите, чтобы разница не росла от месяца к месяцу.[/yellow]"
+    )
 
 
 def _print_reconcile(discrepancies: tuple) -> None:  # type: ignore[type-arg]

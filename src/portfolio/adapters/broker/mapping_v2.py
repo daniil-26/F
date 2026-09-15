@@ -163,6 +163,7 @@ def parse(content: bytes, tables: list[RawTable] | None = None) -> ParsedReport:
     operations: list[ParsedOperation] = []
     balances: list[ParsedBalance] = []
     unparsed: list[UnparsedRow] = []
+    has_loans = False
 
     # Справочник бумаг строится до разбора сделок: в подзаголовке группы сделок
     # ISIN нет, и без раздела 2 сделку не к чему привязать (A-23).
@@ -182,6 +183,7 @@ def parse(content: bytes, tables: list[RawTable] | None = None) -> ParsedReport:
         elif number in TRADE_SECTIONS:
             _collect(_trades(section, header, instruments), operations, unparsed)
         elif number in LOAN_SECTIONS:
+            has_loans = True
             _collect(_loan_operations(section, header, instruments), operations, unparsed)
         elif number in CASH_OPERATION_SECTIONS:
             _collect(_cash_operations(section, header, instruments), operations, unparsed)
@@ -204,6 +206,7 @@ def parse(content: bytes, tables: list[RawTable] | None = None) -> ParsedReport:
         period_start=header.period_start,
         period_end=header.period_end,
         account_code=header.account_code,
+        has_loan_section=has_loans,
     )
 
 

@@ -7,7 +7,12 @@
 from __future__ import annotations
 
 from portfolio.config import Settings
-from portfolio.domain.inbox import InboxItem, from_discrepancies, from_unparsed
+from portfolio.domain.inbox import (
+    InboxItem,
+    from_discrepancies,
+    from_tolerated,
+    from_unparsed,
+)
 from portfolio.jobs.check import run_check
 
 __all__ = ["collect_inbox"]
@@ -34,6 +39,13 @@ def collect_inbox(settings: Settings | None = None) -> list[InboxItem]:
         items.extend(
             from_discrepancies(
                 report.result.discrepancies,
+                source=report.filename,
+                as_of=report.period_end,
+            )
+        )
+        items.extend(
+            from_tolerated(
+                report.result.tolerated,
                 source=report.filename,
                 as_of=report.period_end,
             )

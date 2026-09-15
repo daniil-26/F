@@ -13,7 +13,7 @@ from datetime import date
 from portfolio.adapters.broker.dto import UnparsedRow
 from portfolio.domain.reconcile import Discrepancy
 
-__all__ = ["InboxItem", "from_discrepancies", "from_unparsed"]
+__all__ = ["InboxItem", "from_discrepancies", "from_tolerated", "from_unparsed"]
 
 
 @dataclass(frozen=True)
@@ -34,6 +34,33 @@ def from_unparsed(rows: Iterable[UnparsedRow], source: str | None = None) -> lis
             source=source,
         )
         for row in rows
+    ]
+
+
+def from_tolerated(
+    discrepancies: Sequence[Discrepancy],
+    source: str | None = None,
+    as_of: date | None = None,
+) -> list[InboxItem]:
+    """Расхождения, принятые мягким допуском (A-27).
+
+    Во «Входящие» они попадают отдельным видом: импорт они не останавливают, но
+    остаток накопителен, и растущая из месяца в месяц разница — уже не
+    неточность займа, а ошибка разбора.
+    """
+    return [
+        InboxItem(
+            kind="tolerated_discrepancy",
+            title=f"Принято в пределах допуска: {item.label}",
+            detail=(
+                f"в отчёте {item.expected}, в журнале {item.actual}, "
+                f"разница {item.difference}. Отчёт содержит заём бумаг (A-27); "
+                f"растущая разница означает ошибку разбора"
+            ),
+            source=source,
+            as_of=as_of,
+        )
+        for item in discrepancies
     ]
 
 

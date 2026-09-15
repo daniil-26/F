@@ -13,6 +13,7 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 from sqlalchemy import select
@@ -116,6 +117,11 @@ def _check_report(session: Session, report: RawReport) -> ReportCheck:
         cash_tolerance=get_settings().reconcile_cash_tolerance,
         quantity_tolerance=get_settings().reconcile_quantity_tolerance,
         labels=_instrument_labels(session),
+        soft_cash_tolerance=(
+            get_settings().reconcile_loan_tolerance
+            if parsed.has_loan_section
+            else Decimal(0)
+        ),
     )
 
     return ReportCheck(

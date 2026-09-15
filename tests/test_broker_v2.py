@@ -429,3 +429,69 @@ def test_control_quantity_falls_back_to_the_closing_one() -> None:
     by_name = {item.ticker: item.quantity for item in report.balances if item.kind == "security"}
 
     assert by_name["Сбер ао"] == Decimal("0.00")
+
+
+_UNBALANCED_LOAN_REPORT = """<html><body><table>
+<tr><td>Номер счета клиента</td><td>СЧЕТ-77</td></tr>
+<tr><td>за период с 01.03.2024 по 31.03.2024</td></tr>
+<tr><td>1. Состояние денежных средств на счете</td></tr>
+<tr><td>Входящий остаток (всего):</td><td>RUR</td></tr>
+<tr><td>Исходящий остаток (всего):</td><td>0.48</td></tr>
+<tr><td>2. Состояние портфеля ценных бумаг</td></tr>
+<tr><td>Наименование ЦБ</td><td>ISIN</td><td>Количество ЦБ на конец периода, шт.</td>
+    <td>Плановое количество ЦБ, шт.</td></tr>
+<tr><td>Сбер ао</td><td>RU0009029540</td><td>0</td><td>0</td></tr>
+<tr><td>{section}</td></tr>
+<tr><td>Номер сделки</td><td>Дата сделки</td><td>Вид сделки</td><td>Количество ЦБ, шт.</td>
+    <td>Сумма сделки</td><td>% по сделке</td><td>Валюта суммы сделки</td>
+    <td>Брокерская комиссия</td><td>Валюта брокерской комиссии</td>
+    <td>Тип сделки займа</td><td>Дата оплаты</td></tr>
+<tr><td>ПАО "Сбербанк России" Сбер ао 10301481B RUR</td></tr>
+<tr><td>B-000101-000004</td><td>19.03.2024</td><td>Возврат займа ценных бумаг</td><td>10</td>
+    <td>3 000.00</td><td>0.25</td><td>RUR</td><td>0.07</td><td>RUR</td>
+    <td>2-я часть</td><td>20.03.2024</td></tr>
+</table></body></html>"""
+
+
+def test_loan_section_is_flagged_on_the_report() -> None:
+    """Признак нужен сверке: мягкий допуск применяется только к таким отчётам."""
+    assert parse(_LOAN_REPORT.encode("utf-8")).has_loan_section
+    # Раздела 5.4 в отчёте может не быть вовсе — тогда сверка строгая.
+    assert not parse(_PENDING_DELIVERY_REPORT.encode("utf-8")).has_loan_section
+
+
+def test_small_gap_is_accepted_only_when_the_report_has_loans(
+    database: Path, tmp_path: Path
+) -> None:
+    """A-27: послабление привязано к разделу займа, а не к величине расхождения.
+
+    Один и тот же файл с одним и тем же расхождением в 0.30 импортируется,
+    когда строки стоят в разделе займа, и не импортируется, когда те же строки
+    объявлены биржевыми сделками.
+    """
+    loan = tmp_path / "loan.html"
+    loan.write_text(
+        _UNBALANCED_LOAN_REPORT.format(section="5.4 Сделки займа ценных бумаг"),
+        encoding="utf-8",
+    )
+
+    result = import_broker_report(loan)
+
+    assert result.committed, "отчёт с займом импортируется"
+    assert result.reconcile.ok
+    (tolerated,) = result.reconcile.tolerated
+    assert tolerated.difference == Decimal("-0.30")
+
+
+def test_same_gap_without_loans_stops_the_import(database: Path, tmp_path: Path) -> None:
+    plain = tmp_path / "plain.html"
+    plain.write_text(
+        _UNBALANCED_LOAN_REPORT.format(section="5.1 Биржевые сделки с ценными бумагами"),
+        encoding="utf-8",
+    )
+
+    result = import_broker_report(plain)
+
+    assert not result.committed
+    assert result.reconcile.tolerated == ()
+    assert result.reconcile.discrepancies
