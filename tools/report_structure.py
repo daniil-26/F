@@ -640,15 +640,22 @@ def print_parse(path: Path) -> None:
 
     repeats = len(report.operations) - len(settled)
     print(f"\nоперации: {len(report.operations)}, из них схлопнуто повторов: {repeats}")
-    header = f"  {'дата':<12}{'тип':<16}{'бумага':<24}{'количество':>14}{'сумма':>16}  влт"
+    # ISIN отдельной колонкой, а не «наименование либо ISIN»: при разборе
+    # конвертации и прочих смен личности вопрос всегда в том, одна это бумага
+    # или две, и ответ даёт только ISIN (A-28).
+    header = (
+        f"  {'дата':<12}{'тип':<16}{'бумага':<22}{'ISIN':<14}"
+        f"{'количество':>13}{'сумма':>15}  влт"
+    )
     print(header)
     for operation in sorted(report.operations, key=lambda item: (item.trade_date, item.kind)):
-        name = (operation.ticker or operation.isin or "—")[:23]
-        quantity = "—" if operation.quantity is None else f"{operation.quantity:>14}"
+        name = (operation.ticker or "—")[:21]
+        isin = (operation.isin or "—")[:13]
+        quantity = "—" if operation.quantity is None else f"{operation.quantity:>13}"
         mark = "  " if id(operation) in counted else " ·"
         print(
-            f"{mark}{operation.trade_date!s:<12}{_operation_label(operation):<16}{name:<24}"
-            f"{quantity:>14}{operation.amount:>16}  {operation.currency}"
+            f"{mark}{operation.trade_date!s:<12}{_operation_label(operation):<16}{name:<22}"
+            f"{isin:<14}{quantity:>13}{operation.amount:>15}  {operation.currency}"
         )
     if repeats:
         print("  · — строка уже учтена: та же сделка пришла и в 5.1, и в 5.10 (A-22)")
