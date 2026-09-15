@@ -553,3 +553,52 @@ def test_lookup_by_name_never_returns_another_issue(session: Session) -> None:
     session.flush()
 
     assert InstrumentResolver(session).find(ticker="Акция", isin="RU0000000002") is None
+
+
+_CONVERSION_REPORT = """<html><body><table>
+<tr><td>Номер счета клиента</td><td>СЧЕТ-77</td></tr>
+<tr><td>за период с 01.03.2025 по 31.03.2025</td></tr>
+<tr><td>2. Состояние портфеля ценных бумаг</td></tr>
+<tr><td>Наименование ЦБ</td><td>Номер гос. регистрации</td><td>ISIN</td>
+    <td>Количество ЦБ на конец периода, шт.</td><td>Плановое количество ЦБ, шт.</td></tr>
+<tr><td>Акция</td><td>1-01-00008-E</td><td>RU0000000008</td><td>60.00</td><td>60.00</td></tr>
+<tr><td>Акция старое имя</td><td>1-01-00008-E</td><td>{old_isin}</td><td>0.00</td><td>0.00</td></tr>
+<tr><td>8.2 Неторговые операции с ЦБ</td></tr>
+<tr><td>Дата</td><td>Тип операции</td><td>Наименование ЦБ</td><td>Номер гос. регистрации</td>
+    <td>ISIN</td><td>Эмитент</td><td>Количество ЦБ</td><td>Комментарий</td></tr>
+<tr><td>15.03.2025</td><td>Конвертация ЦБ</td><td>Акция</td><td>1-01-00008-E</td>
+    <td>RU0000000008</td><td>"Эмитент"</td><td>60.00</td>
+    <td>Конвертация "Эмитент", ISIN RU0000000008; 1:10</td></tr>
+<tr><td>15.03.2025</td><td>Конвертация ЦБ</td><td>Акция старое имя</td><td>1-01-00008-E</td>
+    <td>{old_isin}</td><td>"Эмитент"</td><td>-6.00</td>
+    <td>Конвертация "Эмитент", ISIN RU0000000008; 1:10</td></tr>
+</table></body></html>"""
+
+
+def test_conversion_leg_without_isin_is_identified_by_the_comment() -> None:
+    """A-29: у списываемой стороны конвертации брокер не печатает ISIN.
+
+    Строка названа устаревшим наименованием, колонка ISIN пуста, а бумага
+    названа в комментарии — и это тот же ISIN, под которым выпуск числился до
+    конвертации. Без восстановления списание заводит вторую запись справочника,
+    зачисление ложится на первую, и количества расходятся ровно на размер
+    позиции.
+    """
+    report = parse(_CONVERSION_REPORT.format(old_isin="").encode("utf-8"))
+
+    legs = _of_kind(report, "CONVERSION")
+    assert {item.isin for item in legs} == {"RU0000000008"}, "обе стороны — одна бумага"
+    assert sum(item.quantity or Decimal(0) for item in legs) == Decimal("54.00")
+    assert not report.unparsed
+
+
+def test_conversion_leg_with_its_own_isin_keeps_it() -> None:
+    """Если ISIN у списываемой стороны напечатан, он и используется.
+
+    Восстановление по комментарию — запасной путь, а не подмена: бывают
+    конвертации, где старый и новый выпуски действительно разные бумаги.
+    """
+    report = parse(_CONVERSION_REPORT.format(old_isin="RU0000000009").encode("utf-8"))
+
+    legs = _of_kind(report, "CONVERSION")
+    assert {item.isin for item in legs} == {"RU0000000008", "RU0000000009"}

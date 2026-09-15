@@ -16,7 +16,9 @@
   в рублях, а не ставка. Раздел 5.9 (незавершённые сделки) пропускается: расчётов
   по ним ещё не было, деньги придут в 5.4 следующего отчёта (A-24);
 * A-25 — контрольный денежный остаток берётся из строки «Исходящий остаток
-  (всего)», а не «плановый»: плановый включает неисполненные обязательства.
+  (всего)», а не «плановый»: плановый включает неисполненные обязательства;
+* A-29 — у списываемой стороны конвертации ISIN не напечатан, и бумага
+  восстанавливается из комментария: обе строки описывают один выпуск.
 """
 
 from __future__ import annotations
@@ -730,6 +732,19 @@ def _security_operation_row(
     operation_date = parse_date(_require(row, columns, "trade_date"))
     name = _value(row, columns, "instrument_name")
     isin = _isin(_value(row, columns, "isin"))
+    comment = _value(row, columns, "comment")
+
+    if isin is None:
+        # У списываемой стороны конвертации брокер не печатает ISIN: строка
+        # названа устаревшим наименованием, а колонка пуста. Бумага названа в
+        # комментарии — «Конвертация …, ISIN …; 1:10», — и это тот же ISIN, под
+        # которым выпуск числился до конвертации (A-29). Без этого списание
+        # заводит вторую запись справочника, зачисление ложится на первую, и
+        # количества расходятся ровно на размер позиции.
+        found_name, found_isin = _instrument_of(comment or "", instruments)
+        if found_isin is not None:
+            name, isin = found_name or name, found_isin
+
     instruments.add(name=name, regnum=_value(row, columns, "regnum"), isin=isin)
     quantity = parse_decimal(_require(row, columns, "quantity"))
 
@@ -745,7 +760,7 @@ def _security_operation_row(
         # Денег в этом разделе нет: они приходят своей строкой в 8.1.
         amount=Decimal(0),
         currency=header.currency,
-        note=_value(row, columns, "comment"),
+        note=comment,
         raw_row=dict(row),
     )
 
