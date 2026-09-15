@@ -14,9 +14,14 @@ from rich.table import Table
 
 from portfolio.adapters.csv_input import CsvValidationError
 from portfolio.jobs.check import CheckResult, run_check
-from portfolio.jobs.import_broker import ImportResult, import_broker_report
+from portfolio.jobs.import_broker import (
+    ArchiveImportResult,
+    ImportResult,
+    import_broker_archive,
+)
 from portfolio.jobs.import_csv import CsvImportResult, import_csv_file
 from portfolio.jobs.inbox import collect_inbox
+from portfolio.jobs.init_db import init_db
 
 app = typer.Typer(
     help="Учёт инвестиций: журнал, импорт отчётов брокера, сверка.",
@@ -29,9 +34,33 @@ EXIT_DISCREPANCY = 1
 EXIT_INPUT_ERROR = 2
 
 
+@app.command("init-db")
+def init_db_command() -> None:
+    """Создать схему журнала в локальной БД SQLite.
+
+    Боевая схема приезжает миграциями: `alembic upgrade head` на PostgreSQL.
+    Эта команда нужна, чтобы прогнать архив локально, не поднимая сервер.
+    """
+    try:
+        result = init_db()
+    except ValueError as error:
+        console.print(f"[red]{error}[/red]")
+        raise typer.Exit(EXIT_INPUT_ERROR) from error
+
+    console.print(f"База: {result.url}")
+    if result.created:
+        console.print(f"[green]Созданы таблицы: {', '.join(result.created)}.[/green]")
+    if result.existing:
+        console.print(f"Уже были: {', '.join(result.existing)}.")
+    if not result.created:
+        console.print("Схема уже на месте — ничего не менялось.")
+
+
 @app.command("import-broker")
 def import_broker(
-    file: Path = typer.Argument(..., exists=True, dir_okay=False, help="HTML-отчёт брокера"),
+    paths: list[Path] = typer.Argument(
+        ..., exists=True, help="HTML-отчёты брокера или каталоги с ними"
+    ),
     dry_run: bool = typer.Option(False, "--dry-run", help="показать изменения и ничего не писать"),
     account: str | None = typer.Option(None, "--account", help="код счёта, если его нет в отчёте"),
     force: bool = typer.Option(
@@ -39,12 +68,50 @@ def import_broker(
         "--force",
         help="записать, даже если сверка не сошлась (причина попадёт в примечание)",
     ),
+    recursive: bool = typer.Option(
+        False, "-r", "--recursive", help="заходить во вложенные каталоги"
+    ),
+    pattern: str | None = typer.Option(
+        None, "--pattern", help="маска имён внутри каталога, например 'report_2024*'"
+    ),
+    keep_going: bool = typer.Option(
+        False,
+        "--keep-going",
+        help="не останавливаться на первом расхождении (только для разбора)",
+    ),
 ) -> None:
-    """Импортировать отчёт брокера."""
-    result = import_broker_report(file, account_code=account, dry_run=dry_run, force=force)
-    _print_import(result)
+    """Импортировать отчёт брокера или весь архив из каталога.
 
-    if result.unparsed or not result.reconcile.ok:
+    Каталог обходится **в хронологическом порядке по периоду отчёта**: позиции и
+    остатки накопительны, и отчёт за март после майского даст верный итог и
+    неверную историю.
+    """
+    result = import_broker_archive(
+        paths,
+        account_code=account,
+        dry_run=dry_run,
+        force=force,
+        recursive=recursive,
+        pattern=pattern,
+        stop_on_error=not keep_going,
+    )
+
+    for note in result.notes:
+        console.print(f"[yellow]{note}[/yellow]")
+
+    if not result.results and not result.failures:
+        console.print("[red]Не найдено ни одного отчёта.[/red]")
+        raise typer.Exit(EXIT_INPUT_ERROR)
+
+    # Один отчёт — прежний подробный вывод. Оборванный прогон одним отчётом не
+    # считается: там важно, что остальные файлы каталога остались нетронутыми.
+    single = len(result.results) == 1 and not result.failures and not result.stopped_early
+    if single:
+        _print_import(result.results[0])
+    else:
+        _print_archive(result)
+
+    if not result.ok:
         raise typer.Exit(EXIT_DISCREPANCY)
 
 
@@ -121,6 +188,7 @@ def _print_import(result: ImportResult) -> None:
         console.print(unparsed)
 
     _print_reconcile(result.reconcile.discrepancies)
+    _print_tolerated(result.reconcile.tolerated)
 
     if result.dry_run:
         console.print("[yellow]--dry-run: ничего не записано.[/yellow]")
@@ -131,6 +199,55 @@ def _print_import(result: ImportResult) -> None:
             "[red]Не записано: сверка не сошлась.[/red] "
             "Повторить с --force, чтобы подтвердить импорт с расхождением."
         )
+
+
+def _print_archive(result: ArchiveImportResult) -> None:
+    """Сводка по архиву: одна строка на отчёт, в порядке импорта."""
+    table = Table(title="Импорт архива")
+    table.add_column("Отчёт")
+    table.add_column("Период")
+    table.add_column("Новых", justify="right")
+    table.add_column("Уже в журнале", justify="right")
+    table.add_column("Нераспознано", justify="right")
+    table.add_column("Расхождений", justify="right")
+    table.add_column("Записано", justify="right")
+
+    for item in result.results:
+        summary = item.diff.summary()
+        broken = len(item.reconcile.discrepancies)
+        style = "green" if item.ok else "red"
+        table.add_row(
+            Path(item.source).name,
+            f"{item.period_start} — {item.period_end}",
+            str(summary["new"]),
+            str(summary["unchanged"]),
+            str(len(item.unparsed)),
+            str(broken),
+            str(item.written),
+            style=style,
+        )
+    console.print(table)
+
+    for path, error in result.failures:
+        console.print(f"[red]{path}: не обработан — {error}[/red]")
+
+    first_bad = next((item for item in result.results if not item.ok), None)
+    if first_bad is not None:
+        console.print(f"\n[red]Первый отчёт с расхождением: {first_bad.source}[/red]")
+        for row in first_bad.unparsed[:10]:
+            console.print(f"  • нераспознано: {row.reason} — {row.row}")
+        _print_reconcile(first_bad.reconcile.discrepancies)
+
+    if result.stopped_early:
+        console.print(
+            "Остальные отчёты каталога не импортированы: расхождение накапливается, "
+            "и разбирать его нужно с первого. Пройти каталог целиком — --keep-going."
+        )
+
+    console.print(
+        f"Отчётов: {len(result.results)}, подтверждено: {result.committed}, "
+        f"не обработано: {len(result.failures)}"
+    )
 
 
 def _print_csv_import(result: CsvImportResult) -> None:
@@ -184,6 +301,9 @@ def _print_check(result: CheckResult) -> None:
         if report.result.discrepancies:
             console.print(f"[red]Расхождения: {report.filename}[/red]")
             _print_reconcile(report.result.discrepancies)
+        if report.result.tolerated:
+            console.print(f"[yellow]Принято в пределах допуска: {report.filename}[/yellow]")
+            _print_tolerated(report.result.tolerated)
 
     if result.violations:
         violations = Table(title="Нарушенные инварианты", style="red")
@@ -196,6 +316,31 @@ def _print_check(result: CheckResult) -> None:
     console.print(f"Событий в журнале: {result.transactions}")
     if result.ok:
         console.print("[green]Сверка сошлась по всем отчётам, инварианты выполнены.[/green]")
+
+
+def _print_tolerated(tolerated: tuple) -> None:  # type: ignore[type-arg]
+    """Расхождение в пределах мягкого допуска (A-27).
+
+    Печатается всегда: остаток накопителен, и принятая копейка тащится во все
+    следующие месяцы. Молчание здесь превратило бы допуск в тихий дрейф.
+    """
+    if not tolerated:
+        return
+    table = Table(title="Принято в пределах допуска (A-27)", style="yellow")
+    table.add_column("Вид")
+    table.add_column("Объект")
+    table.add_column("В отчёте", justify="right")
+    table.add_column("В журнале", justify="right")
+    table.add_column("Разница", justify="right")
+    for item in tolerated:
+        table.add_row(
+            item.kind, item.label, str(item.expected), str(item.actual), str(item.difference)
+        )
+    console.print(table)
+    console.print(
+        "[yellow]Расхождение принято: отчёт содержит заём бумаг. "
+        "Остаток накопителен — следите, чтобы разница не росла от месяца к месяцу.[/yellow]"
+    )
 
 
 def _print_reconcile(discrepancies: tuple) -> None:  # type: ignore[type-arg]

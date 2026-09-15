@@ -73,3 +73,7 @@ class ParsedReport:
     period_start: date | None = None
     period_end: date | None = None
     account_code: str | None = None
+    # В отчёте были строки займа бумаг. Мягкий допуск сверки применяется только
+    # к таким отчётам (A-27): расчёты по займу ложатся на границу месяца, и
+    # копеечная неточность здесь стоит дороже, чем стоит.
+    has_loan_section: bool = False

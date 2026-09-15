@@ -6,7 +6,7 @@
 
 from __future__ import annotations
 
-from collections.abc import Iterable, Sequence
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from datetime import date
 from decimal import Decimal
@@ -115,7 +115,9 @@ def build_diff(
 
     Для отчётов брокера дифф идёт по `natural_key`: событие с уже существующим
     ключом не пишется повторно, и перекрытие периодов между отчётами проходит
-    штатно.
+    штатно. Повтор внутри одного отчёта схлопывается так же: одна и та же сделка
+    стоит и в разделе заключённых сделок, и в разделе исполнения обязательств
+    (A-22), и второе вхождение — это то же событие, а не второе.
 
     Для декларативных источников (CSV) этого мало. Ключ строки CSV не включает
     сумму — правка ставки дала бы тот же ключ и молча не записалась. Поэтому
@@ -128,10 +130,12 @@ def build_diff(
     existing = _existing_by_key(session, [entry.natural_key for entry in entries])
     new: list[LedgerEntry] = []
     unchanged: list[LedgerEntry] = []
+    seen: set[str] = set()
     for entry in entries:
-        if entry.natural_key in existing:
+        if entry.natural_key in existing or entry.natural_key in seen:
             unchanged.append(entry)
         else:
+            seen.add(entry.natural_key)
             new.append(entry)
 
     return LedgerDiff(new=tuple(new), unchanged=tuple(unchanged))
@@ -282,8 +286,3 @@ def _existing_by_key(session: Session, keys: Sequence[str]) -> dict[str, Transac
         return {}
     found = session.scalars(select(Transaction).where(Transaction.natural_key.in_(keys)))
     return {row.natural_key: row for row in found}
-
-
-def with_report(entries: Iterable[LedgerEntry], report_id: int) -> list[LedgerEntry]:
-    """Проставляет ссылку на сохранённое сырьё всем записям набора."""
-    return [replace(entry, source_report_id=report_id) for entry in entries]

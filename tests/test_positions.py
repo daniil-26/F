@@ -153,7 +153,23 @@ def test_position_absent_from_report_is_a_discrepancy() -> None:
         [ExpectedBalance(kind="cash", quantity=Decimal("-100"), currency="RUB", label="RUB")],
     )
 
-    assert [item.label for item in result.discrepancies] == ["1"]
+    # Без справочника подписей остаётся номер записи: `domain/` в БД не ходит.
+    assert [item.label for item in result.discrepancies] == ["#1"]
+
+
+def test_position_absent_from_report_is_named_when_labels_are_given() -> None:
+    """Голый номер записи не называет бумагу никак, а именно эту строку и
+    приходится разбирать. Номер при этом остаётся: когда одна бумага завелась
+    в справочнике дважды, различить две строки можно только по нему."""
+    rows = [_row(1, EventType.BUY, trade_date=date(2025, 8, 2), quantity="10", amount="-100")]
+
+    result = reconcile(
+        rows,
+        [ExpectedBalance(kind="cash", quantity=Decimal("-100"), currency="RUB", label="RUB")],
+        labels={1: "SBER"},
+    )
+
+    assert [item.label for item in result.discrepancies] == ["SBER (#1)"]
 
 
 def test_cash_tolerance_is_a_kopeck() -> None:
@@ -173,3 +189,86 @@ def test_cash_tolerance_is_a_kopeck() -> None:
         cash_tolerance=Decimal("0.01"),
     )
     assert result.ok
+
+
+def test_transfer_moves_the_position() -> None:
+    """«Ввод ЦБ» и «Вывод ЦБ» из раздела 8.2 меняют количество, а не деньги.
+
+    Перевод бумаг извне — единственный источник позиции, у которого нет
+    денежного эффекта. Пропущенный проекцией, он даёт расхождение, выглядящее
+    как потерянная операция: строка в журнале есть, в количестве её нет.
+    """
+    rows = [
+        _row(1, EventType.TRANSFER, trade_date=date(2024, 3, 5), quantity="4"),
+        _row(2, EventType.TRANSFER, trade_date=date(2024, 3, 20), quantity="-1"),
+    ]
+
+    positions = positions_on(rows, date(2024, 3, 31))
+
+    assert positions[1].quantity == Decimal(3)
+
+
+def test_cash_transfer_without_instrument_is_not_a_position() -> None:
+    """Тот же тип без бумаги позицией не становится: строка без инструмента
+    пропускается, а не заводит позицию с пустым ключом."""
+    rows = [_row(1, EventType.TRANSFER, trade_date=date(2024, 3, 5), instrument_id=None)]
+
+    assert positions_on(rows, date(2024, 3, 31)) == {}
+
+
+def test_soft_tolerance_keeps_the_discrepancy_visible() -> None:
+    """A-27: расхождение в пределах мягкого допуска не роняет импорт.
+
+    Но и не исчезает: остаток накопителен, и принятая копейка тащится во все
+    следующие месяцы. Молча проглоченное расхождение через год неотличимо от
+    верных данных.
+    """
+    rows = [_row(1, EventType.CASH_IN, trade_date=date(2024, 3, 1), amount="100.00")]
+
+    result = reconcile(
+        rows,
+        [ExpectedBalance(kind="cash", quantity=Decimal("100.30"), currency="RUB", label="RUB")],
+        soft_cash_tolerance=Decimal("1.00"),
+    )
+
+    assert result.ok
+    assert result.discrepancies == ()
+    (tolerated,) = result.tolerated
+    assert tolerated.difference == Decimal("-0.30")
+
+
+def test_soft_tolerance_does_not_cover_a_large_gap() -> None:
+    rows = [_row(1, EventType.CASH_IN, trade_date=date(2024, 3, 1), amount="100.00")]
+
+    result = reconcile(
+        rows,
+        [ExpectedBalance(kind="cash", quantity=Decimal("102.00"), currency="RUB", label="RUB")],
+        soft_cash_tolerance=Decimal("1.00"),
+    )
+
+    assert not result.ok
+    assert result.tolerated == ()
+
+
+def test_soft_tolerance_never_covers_quantities() -> None:
+    """«Почти столько же акций» не бывает: количество обязано сходиться точно."""
+    rows = [
+        _row(1, EventType.BUY, trade_date=date(2024, 3, 1), quantity="10", instrument_id=1)
+    ]
+
+    result = reconcile(
+        rows,
+        [
+            ExpectedBalance(
+                kind="security",
+                quantity=Decimal("10.3"),
+                currency="RUB",
+                instrument_id=1,
+                label="SBER",
+            )
+        ],
+        soft_cash_tolerance=Decimal("1.00"),
+    )
+
+    assert not result.ok
+    assert result.tolerated == ()

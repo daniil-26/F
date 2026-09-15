@@ -90,6 +90,10 @@ class EventType(enum.StrEnum):
     SELL = "SELL"
     COUPON = "COUPON"
     DIVIDEND = "DIVIDEND"
+    # Вознаграждение за заём бумаг брокером. Не `CASH_IN`: деньги не приходят
+    # извне, их зарабатывает сам портфель, а `CASH_IN` числится внешним потоком
+    # и завысил бы приток, занизив доходность (A-21).
+    LENDING_INCOME = "LENDING_INCOME"
     AMORTIZATION = "AMORTIZATION"
     MATURITY = "MATURITY"
     FX_CONVERT = "FX_CONVERT"
@@ -131,6 +135,9 @@ class FeeKind(enum.StrEnum):
     BROKER = "BROKER"
     DEPOSITARY = "DEPOSITARY"
     EXCHANGE = "EXCHANGE"
+    # Гербовый сбор: отдельная колонка в отчёте, отдельный вид и здесь.
+    # Свести его к OTHER значит потерять возможность сверить его отдельно.
+    STAMP = "STAMP"
     WITHDRAWAL = "WITHDRAWAL"
     OTHER = "OTHER"
 
@@ -184,8 +191,10 @@ class Instrument(Base):
     )
     currency: Mapped[str | None] = mapped_column(String(3))
 
+    # Уникален только ISIN: он идентифицирует бумагу. Наименование её лишь
+    # подписывает, и брокер его переиспользует — после конвертации старый и
+    # новый выпуски печатаются под одним именем (A-28).
     __table_args__ = (
-        UniqueConstraint("ticker", name="uq_instruments_ticker"),
         UniqueConstraint("isin", name="uq_instruments_isin"),
         CheckConstraint(
             "ticker IS NOT NULL OR isin IS NOT NULL",

@@ -47,6 +47,10 @@ class ReconcileResult:
     as_of: date | None
     discrepancies: tuple[Discrepancy, ...]
     checked: int
+    # Расхождения, укрытые мягким допуском: импорт они не останавливают, но и
+    # не исчезают. Молчаливо проглоченное расхождение через год неотличимо от
+    # верных данных, поэтому оно печатается и попадает во «Входящие» (A-27).
+    tolerated: tuple[Discrepancy, ...] = ()
 
     @property
     def ok(self) -> bool:
@@ -60,18 +64,31 @@ def reconcile(
     as_of: date | None = None,
     cash_tolerance: Decimal = Decimal("0.01"),
     quantity_tolerance: Decimal = Decimal(0),
+    labels: Mapping[int, str] | None = None,
+    soft_cash_tolerance: Decimal = Decimal(0),
 ) -> ReconcileResult:
     """Сравнивает журнал с контрольными числами отчёта.
 
     Деньги сверяются по `settlement_date`, бумаги — по `trade_date`
     (STAGE-1, T7). Позиция, которой нет в отчёте, но есть в журнале, — тоже
     расхождение: потерянная продажа выглядит именно так.
+
+    `soft_cash_tolerance` шире обычного и применяется вызывающим только там, где
+    точность недостижима дёшево (A-27). Расхождение в его пределах не роняет
+    импорт, но попадает в `tolerated`, а не пропадает: величина остатка
+    накопительна, и принятая копейка тащится во все следующие месяцы.
+
+    `labels` — подписи инструментов для таких позиций. Справочник живёт в БД, а
+    `domain/` к ней не ходит, поэтому подписи приходят параметром из `jobs/`.
+    Без них строка расхождения называлась бы голым номером записи, то есть не
+    называлась бы никак.
     """
     rows = list(transactions)
     actual_cash = cash_balances(rows, as_of)
     actual_positions = positions_on(rows, as_of)
 
     discrepancies: list[Discrepancy] = []
+    tolerated: list[Discrepancy] = []
     seen_currencies: set[str] = set()
     seen_instruments: set[int] = set()
 
@@ -80,15 +97,20 @@ def reconcile(
             currency = item.currency.upper()
             seen_currencies.add(currency)
             actual = actual_cash.get(currency, Decimal(0))
-            if abs(actual - item.quantity) > cash_tolerance:
-                discrepancies.append(
-                    Discrepancy(
-                        kind="cash",
-                        label=item.label or currency,
-                        expected=item.quantity,
-                        actual=actual,
-                    )
+            gap = abs(actual - item.quantity)
+            if gap > cash_tolerance:
+                found = Discrepancy(
+                    kind="cash",
+                    label=item.label or currency,
+                    expected=item.quantity,
+                    actual=actual,
                 )
+                # Мягкий допуск только для денег: количество бумаг обязано
+                # сходиться точно — «почти столько же акций» не бывает.
+                if gap <= soft_cash_tolerance:
+                    tolerated.append(found)
+                else:
+                    discrepancies.append(found)
         elif item.kind == "security":
             if item.instrument_id is None:
                 discrepancies.append(
@@ -116,14 +138,22 @@ def reconcile(
             raise ValueError(f"неизвестный вид остатка: {item.kind!r}")
 
     discrepancies.extend(
-        _missing_in_report(actual_cash, seen_currencies, actual_positions, seen_instruments)
+        _missing_in_report(
+            actual_cash, seen_currencies, actual_positions, seen_instruments, labels or {}
+        )
     )
 
     return ReconcileResult(
         as_of=as_of,
         discrepancies=tuple(discrepancies),
         checked=len(expected),
+        tolerated=tuple(tolerated),
     )
+
+
+def _position_label(instrument_id: int, labels: Mapping[int, str]) -> str:
+    known = labels.get(instrument_id)
+    return f"{known} (#{instrument_id})" if known else f"#{instrument_id}"
 
 
 def _missing_in_report(
@@ -131,6 +161,7 @@ def _missing_in_report(
     seen_currencies: set[str],
     actual_positions: Mapping[int, Position],
     seen_instruments: set[int],
+    labels: Mapping[int, str],
 ) -> list[Discrepancy]:
     """Позиции и валюты, которых нет среди контрольных чисел отчёта.
 
@@ -150,7 +181,10 @@ def _missing_in_report(
             result.append(
                 Discrepancy(
                     kind="security",
-                    label=str(instrument_id),
+                    # Номер записи справочника остаётся в метке: когда одна
+                    # бумага завелась дважды, различить две строки можно только
+                    # по нему — названия у них одинаковые.
+                    label=_position_label(instrument_id, labels),
                     expected=Decimal(0),
                     actual=position.quantity,
                 )

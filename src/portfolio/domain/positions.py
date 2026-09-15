@@ -27,6 +27,10 @@ _QUANTITY_EVENTS = frozenset(
         EventType.OPENING_BALANCE,
         EventType.BUY,
         EventType.SELL,
+        # Перевод бумаг извне и наружу (раздел 8.2, «Ввод ЦБ» и «Вывод ЦБ») —
+        # единственный источник позиции без денежного эффекта. Строка без
+        # инструмента отсеивается ниже, поэтому денежный перевод сюда не попадёт.
+        EventType.TRANSFER,
         EventType.MATURITY,
         EventType.CONVERSION,
         EventType.SPIN_OFF,

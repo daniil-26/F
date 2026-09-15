@@ -85,9 +85,13 @@ def parse_report(
     return list(report.operations), list(report.balances), list(report.unparsed)
 
 
-def parse(content: bytes) -> ParsedReport:
-    """То же, плюс реквизиты отчёта: период и код счёта."""
-    tables = extract_tables(content)
+def parse(content: bytes, tables: list[RawTable] | None = None) -> ParsedReport:
+    """То же, плюс реквизиты отчёта: период и код счёта.
+
+    Готовые таблицы можно передать снаружи: диспетчер версий уже разобрал
+    документ, чтобы выбрать версию, и второй разбор той же выгрузки — впустую.
+    """
+    tables = extract_tables(content) if tables is None else tables
     sections = find_sections(tables)
 
     operations: list[ParsedOperation] = []

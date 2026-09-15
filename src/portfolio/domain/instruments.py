@@ -103,25 +103,60 @@ class InstrumentResolver:
         return self._lookup(code, isin_code)
 
     def _lookup(self, code: str | None, isin_code: str | None) -> Instrument | None:
+        # ISIN устойчивее тикера: тикер брокер может писать по-разному.
         if isin_code is not None:
             cached = self._by_isin.get(isin_code)
             if cached is not None:
                 return cached
-        if code is not None:
-            cached = self._by_ticker.get(code)
-            if cached is not None:
-                return cached
-
-        # ISIN устойчивее тикера: тикер брокер может писать по-разному.
-        if isin_code is not None:
             found = self._session.scalar(
                 select(Instrument).where(Instrument.isin == isin_code)
             )
             if found is not None:
                 return found
-        if code is not None:
-            return self._session.scalar(select(Instrument).where(Instrument.ticker == code))
-        return None
+
+        if code is None:
+            return None
+
+        cached = self._by_ticker.get(code)
+        if cached is not None:
+            return self._unless_other_issue(cached, isin_code)
+
+        candidates = [
+            item
+            for item in self._session.scalars(
+                select(Instrument).where(Instrument.ticker == code).order_by(Instrument.id)
+            )
+            if self._unless_other_issue(item, isin_code) is not None
+        ]
+        if not candidates:
+            return None
+        if len(candidates) == 1:
+            return candidates[0]
+
+        # Наименование перестало быть уникальным (A-28), и без ISIN выпуски по
+        # нему не различить. Предпочтение — записи без ISIN: она ещё не
+        # опознана, и её дозаполнит ISIN отчёта. Иначе берётся последняя
+        # заведённая: после конвертации актуален новый выпуск.
+        unidentified = [item for item in candidates if item.isin is None]
+        return unidentified[0] if unidentified else candidates[-1]
+
+    @staticmethod
+    def _unless_other_issue(
+        found: Instrument | None, isin_code: str | None
+    ) -> Instrument | None:
+        """Совпадение по наименованию не перекрывает явный и другой ISIN (A-28).
+
+        Конвертация выпускает бумагу с тем же наименованием и новым ISIN: после
+        обратного сплита «Акция» — это уже другая бумага, чем «Акция» вчера. Если
+        считать их одной записью, списание старого выпуска и зачисление нового
+        схлопнутся, а количества разойдутся ровно на размер позиции.
+
+        Запись без ISIN не конфликтует: она ещё не опознана, и ISIN отчёта её
+        дозаполняет.
+        """
+        if found is None or isin_code is None or found.isin is None:
+            return found
+        return None if found.isin != isin_code else found
 
     def _enrich(
         self,

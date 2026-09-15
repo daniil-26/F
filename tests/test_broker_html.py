@@ -13,11 +13,14 @@ import pytest
 
 from conftest import FIXTURES
 from golden import load, report_to_dict, tables_to_dict
-from portfolio.adapters.broker.anchors import Section, find_sections
-from portfolio.adapters.broker.mapping_v1 import parse, parse_report
+from portfolio.adapters.broker.anchors import Section, find_sections, resolve_columns
+from portfolio.adapters.broker.mapping import parse, parse_report
 from portfolio.adapters.broker.tables import extract_tables
 
 REPORTS = sorted(FIXTURES.glob("*.html"))
+# Отчёты формата v1. Внутренняя согласованность проверяется через якоря v1, а у
+# выгрузки Excel другая раскладка — её проверяет `test_broker_v2.py`.
+V1_REPORTS = [report for report in REPORTS if "_v2_" not in report.stem]
 
 
 @pytest.mark.parametrize("report", REPORTS, ids=lambda path: path.stem)
@@ -44,7 +47,7 @@ def test_nothing_unrecognized(report: Path) -> None:
     assert unparsed == []
 
 
-@pytest.mark.parametrize("report", REPORTS, ids=lambda path: path.stem)
+@pytest.mark.parametrize("report", V1_REPORTS, ids=lambda path: path.stem)
 def test_report_balances_agree_with_operations(report: Path) -> None:
     """Сумма денежных эффектов сходится с движением остатка в самом отчёте.
 
@@ -126,3 +129,71 @@ def _opening_cash(table) -> Decimal:  # type: ignore[no-untyped-def]
     columns = resolve_columns(table)
     row = table.as_dicts()[0]
     return parse_decimal(row[columns["opening_balance"]])
+
+
+# --- объединённые ячейки ------------------------------------------------------
+
+MERGED = """<html><body><table>
+ <tr>
+  <th rowspan="2">Номер сделки</th><th rowspan="2">Количество ЦБ, шт.</th>
+  <th colspan="2">Дата оплаты</th><th colspan="2">Дата поставки</th>
+  <th rowspan="2">Место совершения сделки</th>
+ </tr>
+ <tr><th>Плановая</th><th>Фактическая</th><th>Плановая</th><th>Фактическая</th></tr>
+ <tr><td>B-123456-789012</td><td>50</td><td>06.08.2025</td><td>07.08.2025</td>
+     <td>08.08.2025</td><td>09.08.2025</td><td>Московская биржа (СПОТ: МБ T+)</td></tr>
+</table></body></html>"""
+
+
+def _merged_table():  # type: ignore[no-untyped-def]
+    return extract_tables(MERGED.encode("utf-8"))[0]
+
+
+def test_merged_cells_are_expanded_into_a_grid() -> None:
+    """`colspan` и `rowspan` сдвигают соседей: без разворачивания «Место
+    совершения сделки» из шапки оказывается над «Дата поставки фактическая».
+    """
+    table = _merged_table()
+
+    assert table.has_merged_cells
+    assert table.width == 7
+    assert table.as_dicts()[0]["Место совершения сделки"] == "Московская биржа (СПОТ: МБ T+)"
+
+
+def test_multi_row_header_is_merged_into_column_names() -> None:
+    """Шапка двухстрочная: под объединённой «Дата оплаты» стоят «Плановая» и
+    «Фактическая», и только вместе они называют колонку однозначно."""
+    row = _merged_table().as_dicts()[0]
+
+    assert row["Дата оплаты · Плановая"] == "06.08.2025"
+    assert row["Дата оплаты · Фактическая"] == "07.08.2025"
+    assert row["Дата поставки · Плановая"] == "08.08.2025"
+    assert row["Дата поставки · Фактическая"] == "09.08.2025"
+
+
+def test_second_header_row_is_not_data() -> None:
+    """Строка «Плановая | Фактическая» — часть шапки, а не сделка."""
+    table = _merged_table()
+
+    assert len(table.rows) == 1
+    assert table.rows[0][0] == "B-123456-789012"
+
+
+def test_settlement_date_anchors_know_the_archive_wording() -> None:
+    """В архиве дата расчётов называется «Дата оплаты» (A-03)."""
+    columns = resolve_columns(_merged_table())
+
+    assert columns["settlement_date"] == "Дата оплаты · Фактическая"
+    assert columns["broker_trade_no"] == "Номер сделки"
+    assert columns["quantity"] == "Количество ЦБ, шт."
+
+
+def test_tables_without_merges_are_unchanged() -> None:
+    """Обычная таблица разбирается как прежде: номер колонки равен позиции."""
+    table = extract_tables(
+        b"<html><body><table><tr><th>A</th><th>B</th></tr>"
+        b"<tr><td>1</td><td>2</td></tr></table></body></html>"
+    )[0]
+
+    assert not table.has_merged_cells
+    assert table.as_dicts() == [{"A": "1", "B": "2"}]
